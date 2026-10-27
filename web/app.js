@@ -716,6 +716,32 @@
     if (stateEl) stateEl.textContent = res[1];
   }
 
+  function fmtMmss(total) {
+    const t = Math.max(0, total | 0);
+    const mm = String(Math.floor(t / 60)).padStart(2, "0");
+    const ss = String(t % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+  }
+
+  // 后端为了省 CPU 会一直睡到「到点前 8 秒」，所以剩余时间不可能靠它每秒刷新。
+  // 它只给一个「到点时间戳」，界面自己按本地时钟走字，才不会冻住。
+  function applySlotWithDeadline(el, text, readyAt) {
+    if (!el) return;
+    const stateEl = el.querySelector(".slot-state");
+    const now = Math.floor(Date.now() / 1000);
+    if (readyAt && readyAt > now) {
+      el.dataset.state = "cooldown";
+      if (stateEl) stateEl.textContent = `冷却 ${fmtMmss(readyAt - now)}`;
+      return;
+    }
+    if (readyAt && readyAt <= now) {
+      el.dataset.state = "ready";
+      if (stateEl) stateEl.textContent = "即将就绪";
+      return;
+    }
+    applySlot(el, text);
+  }
+
   const STATE_HINT = {
     idle: "待机中",
     "no-pet": "未检测到桌宠，请先启动鸣潮桌宠",
@@ -736,8 +762,8 @@
   // 一旦拿它回写就会把刚打开的开关又关掉。
   function applyChestStatus(s) {
     if (!s) return;
-    applySlot(slotLeft, s.left);
-    applySlot(slotRight, s.right);
+    applySlotWithDeadline(slotLeft, s.left, s.left_ready_at);
+    applySlotWithDeadline(slotRight, s.right, s.right_ready_at);
     if (chestHint) chestHint.textContent = STATE_HINT[s.state] || s.detail || "待机中";
     if (chestCount) chestCount.textContent = `已开启 ${s.opens_ok || 0} 次`;
     if (chestWarn) chestWarn.hidden = !(autoChest && s.elevated === false);

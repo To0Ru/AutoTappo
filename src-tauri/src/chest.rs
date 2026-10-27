@@ -242,6 +242,11 @@ pub struct ChestSnapshot {
     pub detail: String,
     pub left: String,
     pub right: String,
+    /// 左/右宝箱的「到点时间」（Unix 秒，0 = 未知）。
+    /// 前端拿它本地每秒走字，界面就能真的跟着倒计时，
+    /// 而不是被后端的长睡眠冻住。
+    pub left_ready_at: u64,
+    pub right_ready_at: u64,
     pub opens_ok: u32,
     pub opens_failed: u32,
     pub last_event_unix: u64,
@@ -256,6 +261,8 @@ impl Default for ChestSnapshot {
             detail: "未启动".into(),
             left: "-".into(),
             right: "-".into(),
+            left_ready_at: 0,
+            right_ready_at: 0,
             opens_ok: 0,
             opens_failed: 0,
             last_event_unix: 0,
@@ -1057,6 +1064,11 @@ impl ChestController {
             let mut uia_session: Option<Uia> = None;
             let mut uia_retry_at = Instant::now();
 
+            // 左右宝箱的到点时间（Unix 秒；0 = 未知）。
+            // 用 Cell 是为了让下面只读 snapshot 的 publish 闭包也能读到最新值。
+            let left_ready_at = std::cell::Cell::new(0u64);
+            let right_ready_at = std::cell::Cell::new(0u64);
+
             let publish = |state: &str, detail: &str, left: &str, right: &str| {
                 if let Ok(mut s) = snapshot.lock() {
                     s.enabled = enabled.load(Ordering::Relaxed);
@@ -1065,6 +1077,8 @@ impl ChestController {
                     s.detail = detail.to_string();
                     s.left = left.to_string();
                     s.right = right.to_string();
+                    s.left_ready_at = left_ready_at.get();
+                    s.right_ready_at = right_ready_at.get();
                     s.opens_ok = opens_ok.load(Ordering::Relaxed) as u32;
                     s.opens_failed = opens_failed.load(Ordering::Relaxed) as u32;
                     s.last_event_unix = std::time::SystemTime::now()
@@ -1144,6 +1158,8 @@ impl ChestController {
                     match outcome {
                         // 界面在，但一个宝箱元素都没有：累计点击不足 1000，或面板打开
                         UiaProbe::Empty => {
+                            left_ready_at.set(0);
+                            right_ready_at.set(0);
                             left_state = "-".into();
                             right_state = "-".into();
                             last_detail = "宝箱未解锁（累计点击数不足 1000）".into();
@@ -1154,6 +1170,12 @@ impl ChestController {
                         UiaProbe::Hit(chests) => {
                             let mut min_remain: Option<u32> = None;
                             let mut any_ready = false;
+                            let now_unix = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let mut l_at: u64 = 0;
+                            let mut r_at: u64 = 0;
 
                             for c in chests.iter() {
                                 let text = if c.ready {
@@ -1163,9 +1185,19 @@ impl ChestController {
                                 } else {
                                     "冷却中".to_string()
                                 };
+                                let at = match (c.ready, c.remain) {
+                                    (false, Some(r)) => now_unix + r as u64,
+                                    _ => 0,
+                                };
                                 match c.place {
-                                    Place::Left => left_state = text.clone(),
-                                    Place::Right => right_state = text.clone(),
+                                    Place::Left => {
+                                        left_state = text.clone();
+                                        l_at = at;
+                                    }
+                                    Place::Right => {
+                                        right_state = text.clone();
+                                        r_at = at;
+                                    }
                                 }
                                 if c.ready {
                                     any_ready = true;
@@ -1173,6 +1205,9 @@ impl ChestController {
                                     min_remain = Some(min_remain.map_or(r, |m: u32| m.min(r)));
                                 }
                             }
+                            // 交给前端做本地秒级走字（后端会因为长睡眠而「冻结」）
+                            left_ready_at.set(l_at);
+                            right_ready_at.set(r_at);
 
                             debug_log(format_args!(
                                 "[chest] UIA 左={} 右={} 就绪={}",
@@ -1254,7 +1289,9 @@ impl ChestController {
                             }
                         }
                         UiaProbe::Unavailable => {
-                            // 继续往下走老路径
+                            // 降级到区域 + 像素路径；老路径没有精确时间，清掉倒计时
+                            left_ready_at.set(0);
+                            right_ready_at.set(0);
                         }
                     }
                 }
