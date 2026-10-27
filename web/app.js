@@ -576,17 +576,25 @@
   // 拿不到就按平台约定拼接（GitHub / Gitee 都支持 /releases/download/<tag>/<file>）。
   function buildPortableUrl(channel, tag) {
     const wantGitee = channel === "Gitee";
+    // 注意：必须精确匹配通道名。之前写成
+    //   (c.source === "Gitee" || c.source === "GitHub") === wantGitee
+    // 导致 Gitee 通道也会命中 source === "GitHub" 的候选，
+    // 于是「一键更新（Gitee）」实际去下载 github.com 的地址（已实测踩坑）。
     const hit = cachedCandidates.find(
-      (c) =>
-        (c.source === "Gitee" || c.source === "GitHub") === wantGitee &&
-        c.data &&
-        c.data.tag_name === tag
+      (c) => c.source === channel && c.data && c.data.tag_name === tag
     );
     const assets = (hit && hit.data && hit.data.assets) || [];
-    const pick = assets.find((a) => {
+    const exes = assets.filter((a) => {
       const n = String((a && a.name) || "").toLowerCase();
-      return n.endsWith(".exe") && n.indexOf("setup") < 0 && n.indexOf("install") < 0;
+      const u = String((a && a.browser_download_url) || "");
+      if (!u) return false;
+      // 再兜一层：Gitee 通道绝不允许拿到 github 的地址，反之亦然
+      const hostOk = wantGitee ? u.indexOf("gitee.com") >= 0 : u.indexOf("github.com") >= 0;
+      return hostOk && n.endsWith(".exe") && n.indexOf("setup") < 0 && n.indexOf("install") < 0;
     });
+    // 优先用规范文件名 AutoTappo.exe（Gitee 上可能存在同内容但改名过的附件）
+    const pick =
+      exes.find((a) => String(a.name || "").toLowerCase() === "autotappo.exe") || exes[0];
     if (pick && pick.browser_download_url) return pick.browser_download_url;
     return wantGitee
       ? `https://gitee.com/To0Ru/AutoTappo/releases/download/${tag}/AutoTappo.exe`
@@ -675,6 +683,16 @@
       return;
     }
 
+    if (stage === "retry") {
+      const n = got || 0;
+      const all = total || 0;
+      if (updateProgressText) {
+        updateProgressText.textContent =
+          all > 0 ? `连不上，正在重试（第 ${n}/${all} 轮）…` : "连不上，正在重试…";
+      }
+      return;
+    }
+
     if (stage === "verify") {
       if (updateProgressFill) {
         updateProgressFill.classList.remove("is-indeterminate");
@@ -723,11 +741,9 @@
       return;
     }
 
-    const url = buildPortableUrl(channel, tag);
-
     // 普通浏览器预览模式没有原生能力，退化为打开下载地址
     if (!isTauri) {
-      window.open(url, "_blank");
+      window.open(buildPortableUrl(channel, tag), "_blank");
       return;
     }
 
@@ -737,28 +753,42 @@
     if (btnCheckNow) btnCheckNow.style.display = "none";
     if (changelogArea) changelogArea.style.display = "none";
     if (updateGuideCard) updateGuideCard.style.display = "none";
-
-    setUpdateProgress(`正在从 ${channel} 下载 ${tag}…`);
     showUpdateProgress(true);
 
-    try {
-      await invoke("apply_update", { url });
-      // 正常情况下进程已经在重启，几乎不会走到这里
-      setUpdateProgress("更新完成，正在重启…");
-    } catch (e) {
-      updateBusy = false;
-      if (btnDownload) btnDownload.style.pointerEvents = "";
-      if (btnGitee) btnGitee.style.pointerEvents = "";
-      if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
-      showUpdateProgress(false);
+    // 一个源失败就自动换另一个源再试一次（国内 GitHub 经常连不上，Gitee 一般很稳）
+    const order = channel === "Gitee" ? ["Gitee", "GitHub"] : ["GitHub", "Gitee"];
+    let lastErr = "";
+    let cancelled = false;
 
-      const msg = String((e && e.message) || e || "未知错误");
-      if (msg.indexOf("已取消") >= 0) {
-        setUpdateError("已取消更新，程序保持原样。网速慢的话可以点下面的链接手动下载。");
-      } else {
-        setUpdateError(`更新失败：${msg}`);
+    for (let i = 0; i < order.length; i++) {
+      const ch = order[i];
+      const url = buildPortableUrl(ch, tag);
+      setUpdateProgress(`${i === 0 ? "正在" : "换源重试：正在"}从 ${ch} 下载 ${tag}…`);
+      try {
+        await invoke("apply_update", { url });
+        // 正常情况下进程已经在重启，几乎不会走到这里
+        setUpdateProgress("更新完成，正在重启…");
+        return;
+      } catch (e) {
+        lastErr = String((e && e.message) || e || "未知错误");
+        console.error(`[update] ${ch} 下载失败:`, e);
+        if (lastErr.indexOf("已取消") >= 0) {
+          cancelled = true;
+          break;
+        }
       }
-      console.error("[update] apply_update failed:", e);
+    }
+
+    updateBusy = false;
+    if (btnDownload) btnDownload.style.pointerEvents = "";
+    if (btnGitee) btnGitee.style.pointerEvents = "";
+    if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
+    showUpdateProgress(false);
+
+    if (cancelled) {
+      setUpdateError("已取消更新，程序保持原样。网速慢的话可以点下面的链接手动下载。");
+    } else {
+      setUpdateError(`更新失败：${lastErr}（已自动换源重试，仍不行就手动下载）`);
     }
   }
 

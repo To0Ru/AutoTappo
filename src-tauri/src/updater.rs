@@ -249,9 +249,9 @@ fn download_once(
             ));
         }
         let session = WinHandle(session);
-        // 放宽到「慢网也能过」：国内直连 GitHub 经常几十秒才拿到首字节，
-        // 旧的 20s/20s/30s/60s 会在 12002 上直接判死。
-        WinHttpSetTimeouts(session.0, 20_000, 30_000, 30_000, 120_000);
+        // 缩短「连不上」的判定时间：真能连的链路首字节都在几百 ms 内到。
+        // 旧值 20/30/120 会让一次卡死耗掉半分多钟，体验极差。
+        WinHttpSetTimeouts(session.0, 8_000, 12_000, 30_000, 120_000);
 
         let connect = WinHttpConnect(session.0, host_w.as_ptr(), port, 0);
         if connect.is_null() {
@@ -402,8 +402,10 @@ fn download(
     progress: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<u64, String> {
     let modes: [(u32, &str); 2] = [
-        (WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, "系统代理"),
+        // 先直连：国内访问 Gitee / jsDelivr 本来就是直连最快，
+        // 且「自动代理(WPAD)」在某些机器上要等好几秒才失败（12152）。
         (WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, "直连"),
+        (WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, "系统代理"),
     ];
     let mut last_err = String::from("下载失败");
 
@@ -412,6 +414,9 @@ fn download(
             if CANCEL.load(Ordering::SeqCst) {
                 let _ = fs::remove_file(dest);
                 return Err("已取消更新".into());
+            }
+            if attempt > 1 {
+                progress("retry", attempt as u64, DOWNLOAD_ATTEMPTS as u64);
             }
             let started = std::time::Instant::now();
             match download_once(url, dest, *mode, &mut *progress) {
