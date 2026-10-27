@@ -297,8 +297,8 @@ autotappo/
 8. **双 Git 远端协同**：
    - GitHub: `origin` (`https://github.com/To0Ru/AutoTappo.git`)
    - Gitee: `gitee` (`git@gitee.com:To0Ru/AutoTappo.git`)
-9. **一键自更新（v0.2.1 起）**：升级弹窗里点一下就自动下载、备份旧 exe、原地替换并重启，
-   详见 6.5 节。
+9. **一键自更新（v0.2.1 起，v0.2.2 修好下载链路）**：升级弹窗里点一下就自动下载、备份旧 exe、原地替换并重启，
+   带下载进度条、可随时取消；详见 6.5 节。
 
 ---
 
@@ -384,6 +384,23 @@ autotappo/
 - 诊断日志落盘 `%TEMP%\autotappo-update.log`（GUI 子系统无控制台）。
 
 已知限制：便携版场景才有效；NSIS 安装版用户仍建议用安装包覆盖安装。
+
+**v0.2.2 修正（实测踩坑记录）**：
+
+1. **前端拼错通道**：`buildPortableUrl` 原来写
+   `(c.source === "Gitee" || c.source === "GitHub") === wantGitee`，
+   于是 Gitee 通道也会命中 `source === "GitHub"` 的候选 → 点「Gitee」实际去连 github.com，
+   在国内必然 12002 超时。改为精确匹配通道名，并额外校验 URL 主机（Gitee 通道不接受 github 地址）。
+2. **先直连、再系统代理**：`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`（WPAD 自动发现）在部分机器上会白等数秒
+   并返回 `12152`；Gitee / jsDelivr 在国内直连本来就快，所以把直连放在第一顺位。
+3. **超时收紧**：解析 8 s / 连接 12 s / 发送 30 s / 接收 120 s（原 20/30/30/120 会让一次卡死耗掉半分多钟）。
+4. **错误码翻译**：12002 超时、12007 DNS、12029 连不上、12031 被重置、12175 TLS，
+   不再暴露 `FormatMessageW() returned error 317`。
+5. **失败自动换源**：一个源失败自动换另一个源再试一次；用户点「取消」则立即停止、不换源。
+6. **进度与取消**：后端每 100 ms 通过 `update-progress` 事件上报 `{stage, got, total}`，
+   `cancel_update` 命令置 `CANCEL` 原子量，下载循环逐块检查，取消后清理 `.new` 并保持原样。
+7. **Gitee 发布要点**：附件名必须是 `AutoTappo.exe`（Gitee 用上传时的本地文件名生成下载地址），
+   否则前端约定拼的 `/releases/download/<tag>/AutoTappo.exe` 会 404；Gitee API 不支持删除附件，传错只能留着。
 
 ## 7. 开发者与 Agent 工作准则
 
