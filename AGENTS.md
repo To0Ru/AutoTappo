@@ -339,6 +339,7 @@ autotappo/
 | `cooldown`（UIA 路径） | DOM 读到 `reward-countdown` | 睡到「剩余 − 8 s」，上限 20 min（30 min 冷却约只需 2 次唤醒） |
 | 就绪 | 像素判为就绪 | 立即点击 → 点后验证 |
 | `opened` | 点后验证成功 | **29 min 45 s**（然后 2 s 细扫） |
+| `opened`（UIA 路径） | 点后验证成功 | **3 s**（开掉的那个会变成 30 min 倒计时，下一轮自然按剩余时间睡；双宝箱同时就绪时另一个能立刻点掉） |
 | `retry` | 点了但验证失败 | 5 s |
 | `occluded` | z 序被遮挡 | 2→5→10→30 s 退避 |
 | `need-admin` | `PostMessage` 返回 ERROR_ACCESS_DENIED | 60 s |
