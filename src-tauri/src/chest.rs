@@ -636,7 +636,7 @@ fn ring_margin(scale: f32) -> i32 {
     m.max(5).min(20)
 }
 
-/// 是否开启像素判定诊断日志（设置环境变量 `AUTOTAPPO_CHEST_DEBUG=1` 后从命令行启动可见）。
+/// 是否开启像素判定诊断日志（设置环境变量 `AUTOTAPPO_CHEST_DEBUG=1` 后生效）。
 /// 用于实机校准 stage 2 的比例阈值，不设该变量时几乎零开销。
 fn debug_on() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -648,6 +648,34 @@ fn debug_on() -> bool {
     let on = std::env::var_os("AUTOTAPPO_CHEST_DEBUG").is_some();
     FLAG.store(if on { 1 } else { 0 }, Ordering::Relaxed);
     on
+}
+
+/// 诊断日志文件路径：`%TEMP%\autotappo-chest-debug.log`
+/// （本程序是 GUI 子系统，没有控制台，stderr 看不到，只能落盘）
+fn debug_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("autotappo-chest-debug.log")
+}
+
+/// 写一行诊断日志；未开启诊断或写入失败时静默忽略（绝不影响主流程）
+fn debug_log(args: std::fmt::Arguments) {
+    if !debug_on() {
+        return;
+    }
+    use std::io::Write;
+    let path = debug_log_path();
+    // 超过 1 MB 就清空重来，避免长时间常驻把磁盘写满
+    if let Ok(md) = std::fs::metadata(&path) {
+        if md.len() > 1_048_576 {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{}", args);
+    }
 }
 
 /// 用「按钮框之外」的一圈像素估计壁纸底色（逐通道中位数，抗局部噪声）
@@ -724,13 +752,13 @@ fn classify(buf: &[u8], w: i32, h: i32, inner: &Box2) -> Readiness {
     let warm_ratio = warm as f32 / total as f32;
     let white_ratio = white as f32 / total as f32;
     if debug_on() {
-        eprintln!(
+        debug_log(format_args!(
             "[chest] stage1 warm={:.3} white={:.3} box={}x{}",
             warm_ratio,
             white_ratio,
             inner.w(),
             inner.h()
-        );
+        ));
     }
     if warm_ratio >= 0.30 && white_ratio < 0.15 {
         return Readiness::Ready;
@@ -777,10 +805,10 @@ fn classify(buf: &[u8], w: i32, h: i32, inner: &Box2) -> Readiness {
     let wr2 = warm2 as f32 / total2 as f32;
     let wh2 = white2 as f32 / total2 as f32;
     if debug_on() {
-        eprintln!(
+        debug_log(format_args!(
             "[chest] stage2 bg=({},{},{}) warm={:.3} white={:.3}",
             bg_r, bg_g, bg_b, wr2, wh2
-        );
+        ));
     }
     if wr2 >= 0.28 && wh2 < 0.15 {
         Readiness::Ready
@@ -824,6 +852,7 @@ fn readiness_of(anchor: &Anchor, origin: (i32, i32), pet: &Found) -> (Readiness,
                 Readiness::Cooldown => "冷却中",
                 Readiness::Unknown => "无法判定",
             };
+            debug_log(format_args!("[chest] 判定 = {}", text));
             (state, text.to_string())
         }
         None => (Readiness::Unknown, "截取失败".into()),
