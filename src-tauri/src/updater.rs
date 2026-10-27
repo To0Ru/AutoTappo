@@ -19,8 +19,19 @@ use std::ffi::c_void;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+
+/// 用户点了「取消」后置位；下载循环每读一块就检查一次。
+/// 用全局量是因为 `apply_update` 跑在 spawn_blocking 线程里，
+/// 而「取消」是另一条 IPC 调用，两者只能通过共享状态通信。
+pub static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// 请求取消正在进行的一键更新（下载中的临时文件会被清理）
+pub fn request_cancel() {
+    CANCEL.store(true, Ordering::SeqCst);
+}
 
 #[link(name = "winhttp")]
 extern "system" {
@@ -87,11 +98,20 @@ extern "system" {
 }
 
 const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: u32 = 0;
+/// Win8.1+：使用系统（WinINET/WPAD/PAC）的代理配置。
+/// 国内用户普遍开着 Clash / v2rayN 等系统代理，WebView2 的版本检测走系统代理能通，
+/// 但 WinHTTP 若写死 DEFAULT_PROXY 就会**绕开代理直连**，于是出现「面板能查到新版本，
+/// 一键更新却超时（12002）」的经典现象。
+const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: u32 = 4;
 const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
 const WINHTTP_OPTION_REDIRECT_POLICY: u32 = 88;
 const WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS: u32 = 2;
 const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
+const WINHTTP_QUERY_CONTENT_LENGTH: u32 = 5;
 const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
+
+/// 下载失败的总尝试次数（每次尝试内部还会换两种代理模式各试一遍）
+const DOWNLOAD_ATTEMPTS: u32 = 3;
 
 const NEW_SUFFIX: &str = ".new";
 const BAK_SUFFIX: &str = ".bak";
@@ -178,11 +198,38 @@ fn split_https(url: &str) -> Result<(String, u16, String), String> {
     Ok((host.to_ascii_lowercase(), port, path.to_string()))
 }
 
-/// 用 WinHTTP 下载到 dest，返回字节数
-fn download(url: &str, dest: &Path) -> Result<u64, String> {
+/// 把 WinHTTP / Winsock 错误码翻译成人话。
+/// windows crate 的 `FormatMessageW` 常常失败，会退化成
+/// 「FormatMessageW() returned error 317」，对用户完全没有意义。
+fn friendly_err(prefix: &str, e: &std::io::Error) -> String {
+    let code = e.raw_os_error().unwrap_or(0);
+    let hint = match code {
+        12002 => "请求超时（网络太慢或被拦截）",
+        12007 => "域名解析失败（DNS 异常）",
+        12029 => "无法连接服务器（可能被墙或被防火墙拦截）",
+        12030 => "连接被中断",
+        12031 => "连接被重置",
+        12037 => "服务器证书日期无效",
+        12175 => "TLS/证书校验失败（可能是代理或抓包工具）",
+        _ => "",
+    };
+    if hint.is_empty() {
+        format!("{prefix}（错误码 {code}）")
+    } else {
+        format!("{prefix}：{hint}（错误码 {code}）")
+    }
+}
+
+/// 单次下载尝试。`access_type` 决定走系统代理还是直连。
+fn download_once(
+    url: &str,
+    dest: &Path,
+    access_type: u32,
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<u64, String> {
     let (host, port, path) = split_https(url)?;
 
-    let agent = wide("AutoTappo-Updater/1.0");
+    let agent = wide("AutoTappo-Updater/1.1");
     let host_w = wide(&host);
     let path_w = wide(&path);
     let verb = wide("GET");
@@ -190,25 +237,27 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
     unsafe {
         let session = WinHttpOpen(
             agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            access_type,
             std::ptr::null(),
             std::ptr::null(),
             0,
         );
         if session.is_null() {
-            return Err(format!(
-                "初始化 WinHTTP 失败（{}）",
-                std::io::Error::last_os_error()
+            return Err(friendly_err(
+                "初始化 WinHTTP 失败",
+                &std::io::Error::last_os_error(),
             ));
         }
         let session = WinHandle(session);
-        WinHttpSetTimeouts(session.0, 20_000, 20_000, 30_000, 60_000);
+        // 放宽到「慢网也能过」：国内直连 GitHub 经常几十秒才拿到首字节，
+        // 旧的 20s/20s/30s/60s 会在 12002 上直接判死。
+        WinHttpSetTimeouts(session.0, 20_000, 30_000, 30_000, 120_000);
 
         let connect = WinHttpConnect(session.0, host_w.as_ptr(), port, 0);
         if connect.is_null() {
-            return Err(format!(
-                "连接 {host} 失败（{}）",
-                std::io::Error::last_os_error()
+            return Err(friendly_err(
+                &format!("连接 {host} 失败"),
+                &std::io::Error::last_os_error(),
             ));
         }
         let connect = WinHandle(connect);
@@ -223,9 +272,9 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
             WINHTTP_FLAG_SECURE,
         );
         if request.is_null() {
-            return Err(format!(
-                "创建请求失败（{}）",
-                std::io::Error::last_os_error()
+            return Err(friendly_err(
+                "创建请求失败",
+                &std::io::Error::last_os_error(),
             ));
         }
         let request = WinHandle(request);
@@ -249,15 +298,15 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
             0,
         ) == 0
         {
-            return Err(format!(
-                "发送请求失败（{}）",
-                std::io::Error::last_os_error()
+            return Err(friendly_err(
+                "发送请求失败",
+                &std::io::Error::last_os_error(),
             ));
         }
         if WinHttpReceiveResponse(request.0, std::ptr::null_mut()) == 0 {
-            return Err(format!(
-                "接收响应失败（{}）",
-                std::io::Error::last_os_error()
+            return Err(friendly_err(
+                "接收响应失败",
+                &std::io::Error::last_os_error(),
             ));
         }
 
@@ -275,14 +324,38 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
             return Err("读取 HTTP 状态码失败".into());
         }
         if status != 200 {
-            return Err(format!("下载失败，服务器返回 HTTP {status}"));
+            return Err(format!(
+                "服务器返回 HTTP {status}（该地址上可能还没有这个文件）"
+            ));
         }
 
         let mut file = File::create(dest).map_err(|e| format!("创建临时文件失败：{e}"))?;
         let mut buf = vec![0u8; 64 * 1024];
         let mut total: u64 = 0;
 
+        // 总长度：拿得到就用来画进度条（GitHub 的 Azure Blob 会给 Content-Length）
+        let mut total_hint: u64 = 0;
+        let mut cl: u32 = 0;
+        let mut cl_len: u32 = 4;
+        if WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+            std::ptr::null(),
+            &mut cl as *mut u32 as *mut c_void,
+            &mut cl_len,
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            total_hint = cl as u64;
+        }
+        progress("download", 0, total_hint);
+        let mut last_emit = std::time::Instant::now();
+
         loop {
+            if CANCEL.load(Ordering::SeqCst) {
+                return Err("已取消更新".into());
+            }
+
             let mut got: u32 = 0;
             if WinHttpReadData(
                 request.0,
@@ -291,9 +364,9 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
                 &mut got,
             ) == 0
             {
-                return Err(format!(
-                    "读取下载数据失败（{}）",
-                    std::io::Error::last_os_error()
+                return Err(friendly_err(
+                    "读取下载数据失败",
+                    &std::io::Error::last_os_error(),
                 ));
             }
             if got == 0 {
@@ -305,6 +378,12 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
             }
             file.write_all(&buf[..got as usize])
                 .map_err(|e| format!("写入临时文件失败：{e}"))?;
+
+            // 每 100 ms 报一次进度就够顺滑了，避免事件刷屏
+            if last_emit.elapsed().as_millis() >= 100 {
+                progress("download", total, total_hint);
+                last_emit = std::time::Instant::now();
+            }
         }
 
         file.flush()
@@ -313,8 +392,69 @@ fn download(url: &str, dest: &Path) -> Result<u64, String> {
     }
 }
 
+/// 用 WinHTTP 下载到 dest，返回字节数。
+///
+/// 先试「系统代理」（Win8.1+ 的 AUTOMATIC_PROXY，能吃到 Clash/v2rayN 的系统代理），
+/// 再试「直连」；整体最多 `DOWNLOAD_ATTEMPTS` 轮带退避重试。
+fn download(
+    url: &str,
+    dest: &Path,
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<u64, String> {
+    let modes: [(u32, &str); 2] = [
+        (WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, "系统代理"),
+        (WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, "直连"),
+    ];
+    let mut last_err = String::from("下载失败");
+
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        for (mode, label) in modes.iter() {
+            if CANCEL.load(Ordering::SeqCst) {
+                let _ = fs::remove_file(dest);
+                return Err("已取消更新".into());
+            }
+            let started = std::time::Instant::now();
+            match download_once(url, dest, *mode, &mut *progress) {
+                Ok(n) => {
+                    log_line(&format!(
+                        "下载成功：{label}，{n} 字节，用时 {} ms",
+                        started.elapsed().as_millis()
+                    ));
+                    return Ok(n);
+                }
+                Err(e) => {
+                    log_line(&format!(
+                        "第 {attempt} 轮 / {label} 失败（{} ms）：{e}",
+                        started.elapsed().as_millis()
+                    ));
+                    if CANCEL.load(Ordering::SeqCst) || e.contains("已取消") {
+                        let _ = fs::remove_file(dest);
+                        return Err("已取消更新".into());
+                    }
+                    last_err = e;
+                    let _ = fs::remove_file(dest);
+                }
+            }
+        }
+        if attempt < DOWNLOAD_ATTEMPTS {
+            thread::sleep(Duration::from_millis(1_500 * attempt as u64));
+        }
+    }
+
+    Err(format!(
+        "{last_err}（已自动重试 {DOWNLOAD_ATTEMPTS} 轮，系统代理与直连都试过了）"
+    ))
+}
+
 /// 下载并应用更新。成功返回时新进程已经启动，调用方应立即退出当前进程。
-pub fn apply_from_url(url: &str) -> Result<(), String> {
+///
+/// `on_progress(stage, got, total)`：阶段名 + 已下载字节 + 总字节（未知时为 0），
+/// 前端据此画进度条；用户点「取消」后本函数返回 `Err("已取消更新")`。
+pub fn apply_from_url(
+    url: &str,
+    on_progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<(), String> {
+    CANCEL.store(false, Ordering::SeqCst);
     let url = url.trim().to_string();
 
     let host = split_https(&url).map(|(h, _, _)| h)?;
@@ -329,8 +469,10 @@ pub fn apply_from_url(url: &str) -> Result<(), String> {
 
     let _ = fs::remove_file(&new_path);
 
-    let size = download(&url, &new_path)?;
+    on_progress("connect", 0, 0);
+    let size = download(&url, &new_path, on_progress)?;
     log_line(&format!("下载完成，{size} 字节"));
+    on_progress("verify", size, size);
 
     if size < MIN_EXE_SIZE {
         let _ = fs::remove_file(&new_path);
@@ -352,6 +494,7 @@ pub fn apply_from_url(url: &str) -> Result<(), String> {
     }
 
     // 备份旧 exe（运行中的 exe 可以改名，不能删除）
+    on_progress("replace", 0, 0);
     let _ = fs::remove_file(&bak_path);
     fs::rename(&cur, &bak_path)
         .map_err(|e| format!("备份当前程序失败（文件可能被占用）：{e}"))?;
@@ -363,6 +506,7 @@ pub fn apply_from_url(url: &str) -> Result<(), String> {
         return Err(format!("替换程序文件失败，已回滚：{e}"));
     }
     log_line("新版本已就位，准备启动");
+    on_progress("launch", 0, 0);
 
     // 拉起新版本（同权限继承，不会再弹 UAC）
     if let Err(e) = std::process::Command::new(&cur).spawn() {

@@ -65,6 +65,10 @@
   const btnCheckText = document.getElementById("btn-check-text");
   const btnDownload = document.getElementById("btn-download");
   const btnGitee = document.getElementById("btn-gitee");
+  const updateProgressBox = document.getElementById("update-progress");
+  const updateProgressFill = document.getElementById("update-progress-fill");
+  const updateProgressText = document.getElementById("update-progress-text");
+  const btnUpdateCancel = document.getElementById("btn-update-cancel");
 
   // 两个仓库地址（发版页），供指引卡片与底部按钮共用
   const GITHUB_RELEASES_URL = "https://github.com/To0Ru/AutoTappo/releases";
@@ -599,8 +603,114 @@
     if (updateStatusBox) updateStatusBox.className = "update-status-box is-error";
     if (updateStatusText) updateStatusText.textContent = text;
     if (updateSpinner) updateSpinner.style.display = "none";
-    // 失败时把手动下载通道露出来
+    // 失败/取消时把手动下载通道露出来
     if (updateGuideCard) updateGuideCard.style.display = "flex";
+  }
+
+  // ---------------- 下载进度条（后端 update-progress 事件驱动） ----------------
+
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
+    return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  let updateDlStart = 0;
+
+  function showUpdateProgress(show) {
+    if (!updateProgressBox) return;
+    updateProgressBox.style.display = show ? "flex" : "none";
+    if (!show) {
+      updateDlStart = 0;
+      if (updateProgressFill) {
+        updateProgressFill.style.width = "0%";
+        updateProgressFill.classList.remove("is-indeterminate");
+      }
+      if (updateProgressText) updateProgressText.textContent = "准备下载…";
+      if (btnUpdateCancel) {
+        btnUpdateCancel.disabled = false;
+        btnUpdateCancel.textContent = "取消";
+      }
+    }
+  }
+
+  // 事件负载：{ stage: "connect"|"download"|"verify"|"replace"|"launch", got, total }
+  function onUpdateProgress(p) {
+    if (!p) return;
+    const stage = String(p.stage || "");
+    const got = Number(p.got) || 0;
+    const total = Number(p.total) || 0;
+
+    if (stage === "connect") {
+      updateDlStart = Date.now();
+      if (updateProgressFill) {
+        updateProgressFill.classList.add("is-indeterminate");
+        updateProgressFill.style.width = "35%";
+      }
+      if (updateProgressText) updateProgressText.textContent = "正在连接服务器…";
+      return;
+    }
+
+    if (stage === "download") {
+      if (!updateDlStart) updateDlStart = Date.now();
+      if (total > 0) {
+        const pct = Math.min(100, (got / total) * 100);
+        if (updateProgressFill) {
+          updateProgressFill.classList.remove("is-indeterminate");
+          updateProgressFill.style.width = pct.toFixed(1) + "%";
+        }
+        if (updateProgressText) {
+          const secs = Math.max(0.2, (Date.now() - updateDlStart) / 1000);
+          const speed = got / secs;
+          const left = speed > 0 ? Math.max(0, (total - got) / speed) : 0;
+          updateProgressText.textContent =
+            `${pct.toFixed(0)}%  ${fmtBytes(got)} / ${fmtBytes(total)}  ·  ` +
+            `${fmtBytes(speed)}/s  ·  剩约 ${Math.ceil(left)}s`;
+        }
+      } else {
+        // 服务器没给 Content-Length：走不确定态动画
+        if (updateProgressFill) updateProgressFill.classList.add("is-indeterminate");
+        if (updateProgressText) updateProgressText.textContent = `已下载 ${fmtBytes(got)}（总大小未知）`;
+      }
+      return;
+    }
+
+    if (stage === "verify") {
+      if (updateProgressFill) {
+        updateProgressFill.classList.remove("is-indeterminate");
+        updateProgressFill.style.width = "100%";
+      }
+      if (updateProgressText) updateProgressText.textContent = "下载完成，正在校验文件…";
+      return;
+    }
+
+    if (stage === "replace") {
+      if (updateProgressText) updateProgressText.textContent = "正在替换程序文件…";
+      // 到这一步再取消已经没意义了，锁住按钮避免半途中断
+      if (btnUpdateCancel) btnUpdateCancel.disabled = true;
+      return;
+    }
+
+    if (stage === "launch") {
+      if (updateProgressText) updateProgressText.textContent = "正在启动新版本…";
+      if (btnUpdateCancel) btnUpdateCancel.disabled = true;
+    }
+  }
+
+  if (isTauri && window.__TAURI__.event && window.__TAURI__.event.listen) {
+    window.__TAURI__.event.listen("update-progress", (ev) => onUpdateProgress(ev.payload));
+  }
+
+  if (btnUpdateCancel) {
+    btnUpdateCancel.addEventListener("click", async () => {
+      btnUpdateCancel.disabled = true;
+      btnUpdateCancel.textContent = "取消中…";
+      try {
+        await invoke("cancel_update");
+      } catch (e) {
+        console.error("[update] cancel_update failed:", e);
+      }
+    });
   }
 
   async function startOneClickUpdate(channel) {
@@ -626,8 +736,10 @@
     if (btnGitee) btnGitee.style.pointerEvents = "none";
     if (btnCheckNow) btnCheckNow.style.display = "none";
     if (changelogArea) changelogArea.style.display = "none";
+    if (updateGuideCard) updateGuideCard.style.display = "none";
 
-    setUpdateProgress(`正在从 ${channel} 下载 ${tag}…（约 3.6 MB，请稍候）`);
+    setUpdateProgress(`正在从 ${channel} 下载 ${tag}…`);
+    showUpdateProgress(true);
 
     try {
       await invoke("apply_update", { url });
@@ -638,8 +750,14 @@
       if (btnDownload) btnDownload.style.pointerEvents = "";
       if (btnGitee) btnGitee.style.pointerEvents = "";
       if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
+      showUpdateProgress(false);
+
       const msg = String((e && e.message) || e || "未知错误");
-      setUpdateError(`更新失败：${msg}`);
+      if (msg.indexOf("已取消") >= 0) {
+        setUpdateError("已取消更新，程序保持原样。网速慢的话可以点下面的链接手动下载。");
+      } else {
+        setUpdateError(`更新失败：${msg}`);
+      }
       console.error("[update] apply_update failed:", e);
     }
   }

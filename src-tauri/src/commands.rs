@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use std::sync::atomic::Ordering;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{window, AppState};
 
@@ -109,11 +109,33 @@ pub fn relaunch_as_admin(state: State<'_, AppState>, app: AppHandle) -> Result<(
 /// 下载放在阻塞线程池里，避免卡住 WebView 的 IPC 线程。
 /// 更新成功后本进程会直接退出，前端拿不到返回值是正常现象；
 /// 只有失败时才会返回 `Err` 让界面提示原因。
+#[derive(Serialize, Clone)]
+pub struct UpdateProgress {
+    pub stage: String,
+    pub got: u64,
+    pub total: u64,
+}
+
 #[tauri::command]
 pub async fn apply_update(app: AppHandle, url: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || crate::updater::apply_from_url(&url))
-        .await
-        .map_err(|e| format!("更新任务异常：{e}"))??;
+    // 进度事件直接推给前端画进度条（下载慢时用户可以选择取消、改手动下载）
+    let emitter = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::updater::apply_from_url(&url, &mut |stage: &str, got: u64, total: u64| {
+            let _ = emitter.emit(
+                "update-progress",
+                UpdateProgress {
+                    stage: stage.to_string(),
+                    got,
+                    total,
+                },
+            );
+        })
+    })
+    .await
+    .map_err(|e| format!("更新任务异常：{e}"))?;
+
+    result?;
 
     // 新版本已拉起，结束当前进程；.bak 由新进程启动时清理
     let inner = &app.state::<AppState>().0;
@@ -122,4 +144,10 @@ pub async fn apply_update(app: AppHandle, url: String) -> Result<(), String> {
     inner.chest.shutdown.store(true, Ordering::SeqCst);
     app.exit(0);
     Ok(())
+}
+
+/// 取消正在进行的一键更新（下载中的临时文件会被清理，程序保持原样）
+#[tauri::command]
+pub fn cancel_update() {
+    crate::updater::request_cancel();
 }

@@ -169,6 +169,17 @@
             <p id="update-status-text">点击下方按钮获取最新版本信息</p>
           </div>
 
+          <!-- 一键更新下载进度：网慢可以随时取消，改手动下载 -->
+          <div class="update-progress" id="update-progress" style="display: none;">
+            <div class="up-track">
+              <div class="up-fill" id="update-progress-fill"></div>
+            </div>
+            <div class="up-meta">
+              <span id="update-progress-text">准备下载…</span>
+              <button type="button" class="up-cancel-btn" id="btn-update-cancel">取消</button>
+            </div>
+          </div>
+
           <!-- 当有新版本时显示的仓库下载安装指引（GitHub / Gitee 双通道） -->
           <div class="update-guide-card" id="update-guide-card" style="display: none;">
             <div class="guide-header">

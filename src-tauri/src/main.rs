@@ -98,6 +98,7 @@ fn main() {
             commands::set_auto_chest,
             commands::relaunch_as_admin,
             commands::apply_update,
+            commands::cancel_update,
         ])
         .build(tauri::generate_context!())
         .expect("AutoTappo 启动失败");
