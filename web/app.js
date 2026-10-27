@@ -7,6 +7,16 @@
   const GITEE_API_URL = "https://gitee.com/api/v5/repos/To0Ru/AutoTappo/releases/latest";
   const GITHUB_API_URL = "https://api.github.com/repos/To0Ru/AutoTappo/releases/latest";
 
+  // 兜底源：仓库内置的 version.json。
+  // Release API 在部分网络下会 404（Gitee 未发版）或被限流（GitHub 未认证 403），
+  // 而 raw 文件读取不受这些限制，所以作为最后一道保险。
+  const VERSION_FILE_URLS = [
+    "https://gitee.com/To0Ru/AutoTappo/raw/main/version.json",
+    "https://raw.githubusercontent.com/To0Ru/AutoTappo/main/version.json",
+    "https://cdn.jsdelivr.net/gh/To0Ru/AutoTappo@main/version.json",
+  ];
+  const UPDATE_FETCH_TIMEOUT_MS = 6000;
+
   // 检测是否在 Tauri 原生客户端运行
   const isTauri = typeof window.__TAURI__ !== "undefined" && typeof window.__TAURI__.core !== "undefined";
 
@@ -414,27 +424,50 @@
     let latestData = null;
     let source = "Gitee";
 
-    // 1. 优先尝试 Gitee API (国内直连)
-    try {
-      const res = await fetch(GITEE_API_URL, { headers: { Accept: "application/json" } });
-      if (res.ok) {
-        latestData = await res.json();
+    // 带超时的 JSON 拉取：任一源卡住都不会拖慢整体检查
+    async function fetchReleaseJson(url, label) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), UPDATE_FETCH_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          signal: ctrl.signal,
+        });
+        if (!res.ok) {
+          console.warn(`[update] ${label} 返回 HTTP ${res.status}`);
+          return null;
+        }
+        const data = await res.json();
+        if (data && data.tag_name) return { data, source: label };
+        console.warn(`[update] ${label} 无 tag_name 字段`);
+      } catch (e) {
+        console.warn(`[update] ${label} 获取失败:`, e && e.message ? e.message : e);
+      } finally {
+        clearTimeout(timer);
       }
-    } catch (e) {
-      console.warn("Gitee check failed, trying fallback:", e);
+      return null;
     }
 
-    // 2. 兜底尝试 GitHub API
-    if (!latestData || !latestData.tag_name) {
-      try {
-        source = "GitHub";
-        const res = await fetch(GITHUB_API_URL, { headers: { Accept: "application/json" } });
-        if (res.ok) {
-          latestData = await res.json();
-        }
-      } catch (e) {
-        console.warn("GitHub check failed:", e);
-      }
+    // 多源并发查询，然后取版本号最高的一个。
+    // 不能「谁先成功就用谁」——某个源滞后（如 Gitee 未发新版）会导致漏报更新。
+    const candidates = (
+      await Promise.all([
+        fetchReleaseJson(GITEE_API_URL, "Gitee"),
+        fetchReleaseJson(GITHUB_API_URL, "GitHub"),
+        fetchReleaseJson(VERSION_FILE_URLS[0], "Gitee 镜像"),
+        fetchReleaseJson(VERSION_FILE_URLS[1], "GitHub 镜像"),
+        fetchReleaseJson(VERSION_FILE_URLS[2], "jsDelivr"),
+      ])
+    ).filter(Boolean);
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => compareVersions(b.data.tag_name, a.data.tag_name));
+      latestData = candidates[0].data;
+      source = candidates[0].source;
+      console.log(
+        `[update] 候选版本: ${candidates.map((c) => `${c.data.tag_name}(${c.source})`).join(", ")} -> 采用 ${latestData.tag_name}`
+      );
     }
 
     cachedLatestData = { data: latestData, source };
