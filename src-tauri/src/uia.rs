@@ -22,7 +22,9 @@ use std::ffi::c_void;
 
 use windows::core::Interface;
 use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::UI::Accessibility::{IUIAutomation, IUIAutomationElement};
+use windows::Win32::UI::Accessibility::{
+    IUIAutomation, IUIAutomationCondition, TreeScope_Descendants,
+};
 
 /// DOM 类名（官方前端硬编码，见 AGENTS.md 2.3）
 pub const CLASS_COUNTDOWN: &str = "reward-countdown";
@@ -55,9 +57,8 @@ const IID_IUI_AUTOMATION: Guid = Guid {
 
 const COINIT_MULTITHREADED: u32 = 0x0;
 const CLSCTX_INPROC_SERVER: u32 = 0x1;
-/// 单个界面元素树最多下探的节点数（桌宠 DOM 只有十几到几十个节点）
-const NODE_BUDGET: u32 = 400;
-const MAX_DEPTH: u32 = 10;
+/// 单次遍历最多读取的元素个数（桌宠 DOM 只有十几个到几十个节点）
+const NODE_BUDGET: i32 = 400;
 
 #[link(name = "ole32")]
 extern "system" {
@@ -140,56 +141,43 @@ impl Uia {
     /// 返回 `None` 表示 UIA 调用失败（调用方应降级到区域+像素路径）。
     pub fn probe(&self, hwnd: isize) -> Option<Report> {
         unsafe {
-            let root: IUIAutomationElement =
-                self.automation.ElementFromHandle(HWND(hwnd as _)).ok()?;
+            let root = self.automation.ElementFromHandle(HWND(hwnd as _)).ok()?;
+            // 一次 Descendants 遍历拿全量（windows 0.58 没有 FirstChild/NextSibling 包装）
+            let cond: IUIAutomationCondition = self.automation.CreateTrueCondition().ok()?;
+            let all = root.FindAll(TreeScope_Descendants, &cond).ok()?;
+            let count = all.Length().ok()?;
+
             let mut rep = Report::default();
-            let mut budget = NODE_BUDGET;
-            walk(&root, 0, &mut budget, &mut rep);
+            for i in 0..count.min(NODE_BUDGET) {
+                let Ok(el) = all.GetElement(i) else {
+                    continue;
+                };
+                let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+
+                if class == CLASS_DOCK {
+                    if let Ok(r) = el.CurrentBoundingRectangle() {
+                        rep.dock = Some(to_rect(r));
+                    }
+                } else if class == CLASS_COUNTDOWN || class == CLASS_READY {
+                    if let Ok(r) = el.CurrentBoundingRectangle() {
+                        let ready = class == CLASS_READY;
+                        let remain_secs = if ready {
+                            None
+                        } else {
+                            el.CurrentName()
+                                .ok()
+                                .and_then(|b| parse_mmss(&b.to_string()))
+                        };
+                        rep.items.push(Item {
+                            ready,
+                            rect: to_rect(r),
+                            remain_secs,
+                        });
+                    }
+                }
+            }
             Some(rep)
         }
-    }
-}
-
-fn walk(el: &IUIAutomationElement, depth: u32, budget: &mut u32, rep: &mut Report) {
-    if *budget == 0 || depth > MAX_DEPTH {
-        return;
-    }
-    *budget -= 1;
-
-    let class = unsafe { el.Get_CurrentClassName() }
-        .map(|b| b.to_string())
-        .unwrap_or_default();
-
-    if class == CLASS_DOCK {
-        if let Ok(r) = unsafe { el.Get_CurrentBoundingRectangle() } {
-            rep.dock = Some(to_rect(r));
-        }
-    } else if class == CLASS_COUNTDOWN || class == CLASS_READY {
-        if let Ok(r) = unsafe { el.Get_CurrentBoundingRectangle() } {
-            let ready = class == CLASS_READY;
-            let remain_secs = if ready {
-                None
-            } else {
-                unsafe { el.Get_CurrentName() }
-                    .map(|b| b.to_string())
-                    .ok()
-                    .and_then(|s| parse_mmss(&s))
-            };
-            rep.items.push(Item {
-                ready,
-                rect: to_rect(r),
-                remain_secs,
-            });
-        }
-    }
-
-    let mut child = unsafe { el.Get_FirstChild() }.ok();
-    while let Some(c) = child {
-        if *budget == 0 {
-            return;
-        }
-        walk(&c, depth + 1, budget, rep);
-        child = unsafe { c.Get_NextSibling() }.ok();
     }
 }
 
