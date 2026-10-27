@@ -285,10 +285,14 @@ autotappo/
 
 ## 7. 开发者与 Agent 工作准则
 
-- **严格遵从用户 Git 指示**：未经用户明确指示，严禁执行 `git commit` 或 `git push`，一切开发与逆向产物仅在本地工作区流转；
+- **Git 提交与推送的边界**：
+  - **本地 `git commit` 无需征求同意**，应经常提交，作为改错回滚的安全网（提交信息写清改了什么、为什么）；
+  - **`git push` / 打 tag / 发布 Release 必须先征得用户明确同意**，一步一确认，不得自行把改动推到远端；
 - **严禁提交垃圾文件**：严禁提交临时 Python、AHK、.bat 脚本或编译产物；
 - **保持 README.md 纯净**：`README.md` 仅包含用户关心的安装、使用和特色，技术与逆向细节统一沉淀在 `AGENTS.md`；
 - **多平台同步**：完成功能后，使用 `git push origin main && git push gitee main` 保持两端同步；
+- **构建产物主动拉取到本地**：每次 GitHub Actions 编译完成、或发布新 Release 后，**主动下载一份便携版 `AutoTappo.exe` 到 `research/`**（文件名随意，建议带版本号如 `AutoTappo_v0.2.0.exe`），方便用户直接双击测试，省去用户自己去 GitHub 手动下载。`research/` 已被 `.gitignore` 排除，不会误提交；
+- **禁止的进程操作**：**严禁** `Get-Process msedge | Stop-Process` 这类按进程名无差别终止，会杀掉用户正在使用的浏览器。需要无头截图时用独立 `--user-data-dir` 启动并用 `-PassThru` 只结束自己启动的 PID；
 - **打 Tag 发布正式版**：
   ```bash
   git tag v0.1.0

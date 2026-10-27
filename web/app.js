@@ -59,9 +59,16 @@
   const updateGuideCard = document.getElementById("update-guide-card");
   const linkGithubRepo = document.getElementById("link-github-repo");
   const lblGithubRepoUrl = document.getElementById("lbl-github-repo-url");
+  const linkGiteeRepo = document.getElementById("link-gitee-repo");
+  const lblGiteeRepoUrl = document.getElementById("lbl-gitee-repo-url");
   const btnCheckNow = document.getElementById("btn-check-now");
   const btnCheckText = document.getElementById("btn-check-text");
   const btnDownload = document.getElementById("btn-download");
+  const btnGitee = document.getElementById("btn-gitee");
+
+  // 两个仓库地址（发版页），供指引卡片与底部按钮共用
+  const GITHUB_RELEASES_URL = "https://github.com/To0Ru/AutoTappo/releases";
+  const GITEE_RELEASES_URL = "https://gitee.com/To0Ru/AutoTappo/releases";
 
   // 状态变量
   let currentRunning = false;
@@ -419,6 +426,8 @@
       if (changelogArea) changelogArea.style.display = "none";
       if (updateGuideCard) updateGuideCard.style.display = "none";
       if (btnDownload) btnDownload.style.display = "none";
+      if (btnGitee) btnGitee.style.display = "none";
+      if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
     }
 
     let latestData = null;
@@ -501,16 +510,30 @@
         if (changelogContent) changelogContent.textContent = body;
         if (changelogArea) changelogArea.style.display = "block";
 
-        const repoUrl = latestData.html_url || "https://github.com/To0Ru/AutoTappo/releases";
+        // 两个仓库分别按 tag 拼出直达链接，避免某个源返回的 html_url 指向另一个平台
+        const ghUrl = `${GITHUB_RELEASES_URL}/tag/${latestTag}`;
+        const giteeUrl = `${GITEE_RELEASES_URL}/tag/${latestTag}`;
+
+        // 指引卡片展示稳定的 releases 页地址（不带 tag，避免换行折行），
+        // 底部按钮才用带 tag 的直达链接
         if (updateGuideCard) {
           updateGuideCard.style.display = "flex";
-          if (linkGithubRepo) linkGithubRepo.href = repoUrl;
-          if (lblGithubRepoUrl) lblGithubRepoUrl.textContent = repoUrl;
+          if (linkGithubRepo) linkGithubRepo.href = GITHUB_RELEASES_URL;
+          if (lblGithubRepoUrl) lblGithubRepoUrl.textContent = GITHUB_RELEASES_URL;
+          if (linkGiteeRepo) linkGiteeRepo.href = GITEE_RELEASES_URL;
+          if (lblGiteeRepoUrl) lblGiteeRepoUrl.textContent = GITEE_RELEASES_URL;
         }
 
+        // 已确认有新版本，再点「立即检查更新」毫无意义：
+        // 收起检查按钮，换成 GitHub / Gitee 两个下载入口
+        if (btnCheckNow) btnCheckNow.style.display = "none";
         if (btnDownload) {
-          btnDownload.href = repoUrl;
+          btnDownload.href = ghUrl;
           btnDownload.style.display = "inline-flex";
+        }
+        if (btnGitee) {
+          btnGitee.href = giteeUrl;
+          btnGitee.style.display = "inline-flex";
         }
       } else {
         if (updateDot) updateDot.classList.remove("active");
@@ -519,6 +542,8 @@
         if (changelogArea) changelogArea.style.display = "none";
         if (updateGuideCard) updateGuideCard.style.display = "none";
         if (btnDownload) btnDownload.style.display = "none";
+        if (btnGitee) btnGitee.style.display = "none";
+        if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
       }
     } else {
       if (updateDot) updateDot.classList.remove("active");
@@ -530,6 +555,8 @@
       if (changelogArea) changelogArea.style.display = "none";
       if (updateGuideCard) updateGuideCard.style.display = "none";
       if (btnDownload) btnDownload.style.display = "none";
+      if (btnGitee) btnGitee.style.display = "none";
+      if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
     }
   }
 

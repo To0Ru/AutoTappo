@@ -713,6 +713,17 @@ body {
   background: rgba(0, 242, 254, 0.1);
 }
 
+/* Gitee 通道用品牌暖红区分，便于用户一眼分辨国内源 */
+.gitee-repo-url {
+  color: #f87171;
+}
+
+.gitee-repo-url:hover {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.1);
+}
+
 .changelog-area {
   background: rgba(0, 0, 0, 0.3);
   border-radius: var(--radius-sm);
@@ -739,6 +750,7 @@ body {
 .modal-footer {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .modal-btn {
@@ -769,6 +781,16 @@ body {
 .modal-btn.action {
   background: linear-gradient(135deg, #10b981, #059669);
   color: #fff;
+}
+
+/* Gitee 下载按钮：必须排在上面的 .action 之后，才能覆盖绿色渐变 */
+.modal-btn.gitee-action {
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  color: #fff;
+}
+
+.modal-btn.gitee-action:hover {
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.35);
 }
 
 .spinner {

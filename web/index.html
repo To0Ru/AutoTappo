@@ -169,11 +169,11 @@
             <p id="update-status-text">点击下方按钮获取最新版本信息</p>
           </div>
 
-          <!-- 当有新版本时显示的 GitHub 仓库下载安装指引 -->
+          <!-- 当有新版本时显示的仓库下载安装指引（GitHub / Gitee 双通道） -->
           <div class="update-guide-card" id="update-guide-card" style="display: none;">
             <div class="guide-header">
               <span class="guide-tag">新版安装指引</span>
-              <span class="guide-tip">请前往 GitHub 仓库下载并安装新版本：</span>
+              <span class="guide-tip">请前往任一仓库下载并安装新版本：</span>
             </div>
             <a id="link-github-repo" class="github-repo-url" href="https://github.com/To0Ru/AutoTappo/releases" target="_blank" title="点击在浏览器中打开 GitHub 仓库">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -181,6 +181,13 @@
                 <line x1="8" y1="12" x2="16" y2="12"></line>
               </svg>
               <span id="lbl-github-repo-url">https://github.com/To0Ru/AutoTappo/releases</span>
+            </a>
+            <a id="link-gitee-repo" class="github-repo-url gitee-repo-url" href="https://gitee.com/To0Ru/AutoTappo/releases" target="_blank" title="点击在浏览器中打开 Gitee 仓库（国内更快）">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 7h3a5 5 0 0 1 5 5 5 5 0 0 1-5 5h-3m-6 0H6a5 5 0 0 1-5-5 5 5 0 0 1 5-5h3"></path>
+                <line x1="8" y1="12" x2="16" y2="12"></line>
+              </svg>
+              <span id="lbl-gitee-repo-url">https://gitee.com/To0Ru/AutoTappo/releases</span>
             </a>
           </div>
 
@@ -197,6 +204,9 @@
           </button>
           <a id="btn-download" class="modal-btn action" href="https://github.com/To0Ru/AutoTappo/releases" target="_blank" style="display: none;">
             前往 GitHub 仓库安装新版 ↗
+          </a>
+          <a id="btn-gitee" class="modal-btn action gitee-action" href="https://gitee.com/To0Ru/AutoTappo/releases" target="_blank" style="display: none;">
+            前往 Gitee 仓库 ↗
           </a>
         </div>
       </div>
