@@ -185,6 +185,22 @@ PET_SCALE_MIN = 50, PET_SCALE_MAX = 200
 > `[chest] 判定 = …`（每轮一行，可看出循环是否在跑）。超过 1 MB 自动清空，不会写满磁盘；
 > 不设该变量时仅一次 `AtomicU8` 判断，开销可忽略。
 
+**⑫ 多猫重叠导致区域合并 —— UI Automation 才是正解（2026-10-27 实测）**
+
+- 用户把自己桌宠拖到别人桌宠上之后，`GetWindowRgn` 返回的区域会**合并成一整块**：
+  实测 `rects=1`、`bound=(1308,821)-(1704,1032)`（396×211，而单体本应只有约 200 宽）；
+- 锚点的凸起信息被彻底吞掉 → 逐行剖面反解出 `scale = 211/44 ≈ 4.8` 越界 → 一个锚点都定位不到
+  → 面板显示「暂无宝箱」。**与不透明度、桌宠大小完全无关**；把桌宠拖开立刻恢复（已实机确认）；
+- **根本解法：走 UI Automation 直接读官方 WebView 的 DOM**（`src-tauri/src/uia.rs`）：
+  - `Get_CurrentClassName` 直接给出状态：`reward-countdown`＝冷却，`reward-btn`＝就绪；
+  - 冷却剩余时间就是元素 `Name`（来自官方 `<div role="img" aria-label="13:34">`）；
+  - `Get_CurrentBoundingRectangle` 给出精确屏幕矩形，点击坐标 = 矩形中心 − 窗口原点；
+  - `pet-dock-content` 是本体的 DOM 容器（实测 200×211），**只属于自己那只猫**，
+    用它反推缩放 `s = h/211`，再按 CSS 偏移预测左右锚点中心取最近者判左右；
+  - 实测每次遍历 **25~37 ms**；桌宠内存无变化（DOM 只有十几个节点）；
+- **前提**：UIA 受 UIPI 限制，要求与官方桌宠**同等完整性**（本项目已强制 `requireAdministrator`）；
+- **降级策略**：UIA 初始化/调用失败时自动回落到下面的区域 + 像素老路径，失败安全不变。
+
 ---
 
 ## 3. 防干扰与输入拟真技术规范
@@ -232,7 +248,9 @@ autotappo/
 │       ├── window.rs      # 按需创建与销毁主窗口 (452x620，彻底释放 WebView2 渲染内存)
 │       ├── clicker.rs     # 后台静默连点工作线程 (F21~F24发射、礼貌避让、动态热键监听)
 │       ├── chest.rs       # 自动开箱引擎 (窗口发现/区域读取/锚点定位/遮挡检测/像素判定/点击注入)
-│       └── commands.rs    # IPC 接口 (get_status, toggle_running, set_speed, set_hotkey, reset_count, minimize, quit, get_chest_status, set_auto_chest, relaunch_as_admin)
+│       ├── uia.rs         # UIA 无障碍树探测（读官方 WebView DOM：状态/矩形/剩余时间）
+│       ├── updater.rs     # 一键自更新（WinHTTP 下载 → 备份 → 替换 → 重启 → 清理 .bak）
+│       └── commands.rs    # IPC 接口 (get_status, toggle_running, set_speed, set_hotkey, reset_count, minimize, quit, get_chest_status, set_auto_chest, relaunch_as_admin, apply_update)
 ├── web/
 │   ├── index.html         # 精致看板 UI (状态卡片、三档速度、自定义热键胶囊、自动开箱控制卡、更新弹窗)
 │   ├── style.css          # 现代化玻璃拟态 UI (移除刺眼彩色Emoji，全单色几何矢量SVG，细腻微光动画)
@@ -261,13 +279,14 @@ autotappo/
    - 若 Gitee 404 或网络波动，无缝降级到 GitHub API 兜底；
    - **界面唤醒自动检测**：每次从托盘点出界面时后台静默查验（内置 60 秒防抖），发现新版时右上角版本胶囊自动出现呼吸发光红点；
    - 弹窗内明确展示 **GitHub 仓库下载地址与一键跳转按钮**。
-5. **自动开箱引擎（`chest.rs`）**：
+5. **自动开箱引擎（`chest.rs` + `uia.rs`）**：
    - 独立原生线程，默认关闭，由界面开关（`set_auto_chest`）控制；
-   - 每轮重读 `GetWindowRgn`、x 重叠聚类、逐行剖面定位锚点、CSS 比例自校验；
+   - **主线走 UI Automation**：直接读官方 WebView 的 DOM，拿到 `reward-countdown`/`reward-btn`
+     状态、精确矩形与冷却剩余时间——因此**多猫重叠、低不透明度、任意缩放**都不影响；
+   - UIA 不可用时自动回落：每轮重读 `GetWindowRgn`、x 重叠聚类、逐行剖面定位锚点、CSS 比例自校验；
    - z 序遮挡检测（排除自身进程窗口与 `WS_EX_TRANSPARENT` 覆盖层）；
-   - 原生 `BitBlt` 抓取锚点框内缩 12% 采样，`warm/white` 双阈值判定就绪（未知一律不点）；
-   - 点击前 60 ms 区域稳定性校验、点击后 350 ms 效果验证，失败降频重试；
-   - 提权不足时状态置 `need-admin` 并 60 s 退避；
+   - 回落路径用原生 `BitBlt` 抓取锚点框内缩 12% 采样，`warm/white` 双阈值判定就绪（未知一律不点）；
+   - 点击后 350~400 ms 效果验证，失败降频重试；提权不足时状态置 `need-admin` 并 60 s 退避；
    - 稳态 30 分钟仅约 40 次唤醒，CPU ~0.005%。
 6. **强制管理员权限（v0.2.0 起）**：
    - exe 内嵌 `requireAdministrator` manifest，双击即提权，避免用户手动右键或二次重启；
@@ -278,6 +297,8 @@ autotappo/
 8. **双 Git 远端协同**：
    - GitHub: `origin` (`https://github.com/To0Ru/AutoTappo.git`)
    - Gitee: `gitee` (`git@gitee.com:To0Ru/AutoTappo.git`)
+9. **一键自更新（v0.2.1 起）**：升级弹窗里点一下就自动下载、备份旧 exe、原地替换并重启，
+   详见 6.5 节。
 
 ---
 
@@ -300,6 +321,9 @@ autotappo/
 | `background_estimate()` | 框外一圈像素逐通道取中位数，估出壁纸底色 `B` |
 | `classify()` | 两级判定：绝对阈值（100% 不透明度）+ 背景差分（低不透明度） |
 | `post_click()` | `WM_MOUSEMOVE → WM_LBUTTONDOWN → WM_LBUTTONUP`，客户区坐标 |
+| `uia::Uia::probe()` | UIA 读官方 WebView DOM（仅当 UIA 可用时才走这条主线） |
+| `resolve_chests()` | 把 UIA 报告翻译成「左右宝箱 + 客户区点击坐标」，并换算屏幕→客户区 |
+| `predict_place()` | 用 `pet-dock-content` 反推缩放，按 CSS 偏移判定该元素是左还是右 |
 | `is_elevated()` / `relaunch_as_admin()` | 检测自身提权状态 / `ShellExecuteW("runas")` 重启 |
 
 ### 6.2 状态机与时间预算
@@ -310,7 +334,9 @@ autotappo/
 | `no-pet` / 区域为空 | 找不到桌宠 / 面板打开 / F9 隐藏 | 5 s |
 | `moving` | 60 ms 内区域哈希变化（用户拖拽） | 800 ms |
 | `no-chest` | 定位不到锚点（累计数不足） | 10 s |
+| `no-chest`（UIA 路径） | DOM 里一个宝箱元素都没有（累计 < 1000，或面板打开） | 15 s |
 | `cooldown` | 像素判为冷却 | **30 s** |
+| `cooldown`（UIA 路径） | DOM 读到 `reward-countdown` | 睡到「剩余 − 8 s」，上限 20 min（30 min 冷却约只需 2 次唤醒） |
 | 就绪 | 像素判为就绪 | 立即点击 → 点后验证 |
 | `opened` | 点后验证成功 | **29 min 45 s**（然后 2 s 细扫） |
 | `retry` | 点了但验证失败 | 5 s |

@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::uia::{self, Uia};
+
 // ==================== Win32 FFI ====================
 
 type Hwnd = isize;
@@ -211,6 +213,24 @@ enum Readiness {
     Ready,
     Cooldown,
     Unknown,
+}
+
+/// UIA 探测到的一个宝箱（坐标已换算成客户区坐标，可直接投递点击）
+#[derive(Clone, Copy, Debug)]
+struct UiaChest {
+    place: Place,
+    ready: bool,
+    remain: Option<u32>,
+    click: (i32, i32),
+}
+
+/// UIA 单轮探测结果
+enum UiaProbe {
+    /// UIA 不可用或调用失败 —— 本轮降级走区域 + 像素路径
+    Unavailable,
+    /// 读到了界面，但没有宝箱元素（累计点击不足 1000，或面板打开隐藏）
+    Empty,
+    Hit(Vec<UiaChest>),
 }
 
 /// 对外暴露给前端的快照
@@ -923,6 +943,82 @@ pub struct ChestController {
     pub opens_failed: Arc<AtomicU64>,
 }
 
+/// 用本体容器矩形预测左右宝箱中心位置。
+///
+/// 官方 CSS：左锚点 `right:-36px; bottom:24px`，右锚点 `right:-46px; bottom:72px`，
+/// 锚点尺寸 62×44。取两者预测中心的最近者，即可判定左右。
+fn predict_place(rect: uia::Rect, dock: uia::Rect) -> Place {
+    let s = (dock.b - dock.t).max(1) as f32 / 211.0;
+    let (cx, cy) = rect.center();
+    let (cx, cy) = (cx as f32, cy as f32);
+    let right_edge = dock.r as f32;
+    let bottom = dock.b as f32;
+
+    let lx = right_edge + 5.0 * s; // 36 − 62/2
+    let ly = bottom - 46.0 * s; // 24 + 44/2
+    let rx = right_edge + 15.0 * s; // 46 − 62/2
+    let ry = bottom - 94.0 * s; // 72 + 44/2
+
+    let dl = (cx - lx) * (cx - lx) + (cy - ly) * (cy - ly);
+    let dr = (cx - rx) * (cx - rx) + (cy - ry) * (cy - ry);
+    if dl <= dr {
+        Place::Left
+    } else {
+        Place::Right
+    }
+}
+
+/// 同一侧只保留一条（合并就绪标记、取更小的剩余时间）
+fn push_chest(list: &mut Vec<UiaChest>, c: UiaChest) {
+    if let Some(slot) = list.iter_mut().find(|x| x.place == c.place) {
+        slot.ready = slot.ready || c.ready;
+        slot.remain = match (slot.remain, c.remain) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (None, b) => b,
+            (a, None) => a,
+        };
+        return;
+    }
+    list.push(c);
+}
+
+/// 把 UIA 报告翻译成「左右宝箱 + 客户区点击坐标」
+fn resolve_chests(rep: &uia::Report, pet: &Found) -> Vec<UiaChest> {
+    let mut out: Vec<UiaChest> = Vec::new();
+    let mut items = rep.items.clone();
+
+    if let Some(dock) = rep.dock {
+        for it in items.iter() {
+            let (cx, cy) = it.center();
+            push_chest(
+                &mut out,
+                UiaChest {
+                    place: predict_place(it.rect, dock),
+                    ready: it.ready,
+                    remain: it.remain_secs,
+                    click: (cx - pet.origin.0, cy - pet.origin.1),
+                },
+            );
+        }
+    } else {
+        // 没有本体矩形可参考时，退化为「更高的那个是右宝箱」
+        items.sort_by_key(|it| it.rect.t);
+        for (i, it) in items.iter().enumerate() {
+            let (cx, cy) = it.center();
+            push_chest(
+                &mut out,
+                UiaChest {
+                    place: if i == 0 { Place::Right } else { Place::Left },
+                    ready: it.ready,
+                    remain: it.remain_secs,
+                    click: (cx - pet.origin.0, cy - pet.origin.1),
+                },
+            );
+        }
+    }
+    out
+}
+
 impl ChestController {
     pub fn new() -> Self {
         Self {
@@ -956,6 +1052,10 @@ impl ChestController {
             let mut left_state = String::from("-");
             let mut right_state = String::from("-");
             let mut last_detail = String::from("待机");
+
+            // UIA 会话：惰性创建；失败后 5 分钟再试，期间不影响旧路径
+            let mut uia_session: Option<Uia> = None;
+            let mut uia_retry_at = Instant::now();
 
             let publish = |state: &str, detail: &str, left: &str, right: &str| {
                 if let Ok(mut s) = snapshot.lock() {
@@ -1010,6 +1110,154 @@ impl ChestController {
                         continue;
                     }
                 };
+
+                // ①.5 UIA 优先路径：直接读官方 WebView 的 DOM。
+                //
+                // 这条路与「窗口命中区域是否被其他桌宠合并」完全无关（多猫重叠的根因），
+                // 也不受不透明度、桌宠大小、DPI 影响，并且能拿到精确剩余时间。
+                // 只有 UIA 不可用时才降级到 ② 之后的区域 + 像素老路径。
+                if Instant::now() >= uia_retry_at {
+                    if uia_session.is_none() {
+                        uia_session = Uia::new();
+                        if uia_session.is_none() {
+                            // COM 初始化失败：5 分钟后再试，期间走老路径
+                            uia_retry_at = Instant::now() + Duration::from_secs(300);
+                            debug_log(format_args!("[chest] UIA 初始化失败，降级到区域+像素"));
+                        }
+                    }
+
+                    let outcome = match uia_session.as_ref() {
+                        Some(u) => match u.probe(pet.visual) {
+                            Some(rep) if rep.items.is_empty() => UiaProbe::Empty,
+                            Some(rep) => UiaProbe::Hit(resolve_chests(&rep, &pet)),
+                            None => {
+                                // 调用失败：丢弃会话，5 分钟后再重建
+                                uia_retry_at = Instant::now() + Duration::from_secs(300);
+                                uia_session = None;
+                                debug_log(format_args!("[chest] UIA 探测失败，降级到区域+像素"));
+                                UiaProbe::Unavailable
+                            }
+                        },
+                        None => UiaProbe::Unavailable,
+                    };
+
+                    match outcome {
+                        // 界面在，但一个宝箱元素都没有：累计点击不足 1000，或面板打开
+                        UiaProbe::Empty => {
+                            left_state = "-".into();
+                            right_state = "-".into();
+                            last_detail = "宝箱未解锁（累计点击数不足 1000）".into();
+                            publish("no-chest", &last_detail, &left_state, &right_state);
+                            next_check = Instant::now() + Duration::from_secs(15);
+                            continue;
+                        }
+                        UiaProbe::Hit(chests) => {
+                            let mut min_remain: Option<u32> = None;
+                            let mut any_ready = false;
+
+                            for c in chests.iter() {
+                                let text = if c.ready {
+                                    "就绪".to_string()
+                                } else if let Some(r) = c.remain {
+                                    format!("冷却 {}", uia::fmt_mmss(r))
+                                } else {
+                                    "冷却中".to_string()
+                                };
+                                match c.place {
+                                    Place::Left => left_state = text.clone(),
+                                    Place::Right => right_state = text.clone(),
+                                }
+                                if c.ready {
+                                    any_ready = true;
+                                } else if let Some(r) = c.remain {
+                                    min_remain = Some(min_remain.map_or(r, |m: u32| m.min(r)));
+                                }
+                            }
+
+                            debug_log(format_args!(
+                                "[chest] UIA 左={} 右={} 就绪={}",
+                                left_state, right_state, any_ready
+                            ));
+
+                            if !any_ready {
+                                // 有精确剩余时间就睡到快就绪（上限 20 分钟，防状态过期）
+                                let wait_ms = match min_remain {
+                                    Some(r) => (r.saturating_sub(8) as u64 * 1000).clamp(2_000, 20 * 60 * 1000),
+                                    None => COOLDOWN_PROBE_MS,
+                                };
+                                last_detail = "冷却中，到点自动开启".into();
+                                publish("cooldown", &last_detail, &left_state, &right_state);
+                                next_check = Instant::now() + Duration::from_millis(wait_ms);
+                                continue;
+                            }
+
+                            // 有就绪的宝箱：逐个点击（每轮只点一个，点完立刻复查）
+                            let mut acted = false;
+                            for c in chests.iter().filter(|c| c.ready) {
+                                match post_click(pet.input, c.click) {
+                                    Ok(()) => {
+                                        thread::sleep(Duration::from_millis(400));
+                                        let still_ready = uia_session
+                                            .as_ref()
+                                            .and_then(|u| u.probe(pet.visual))
+                                            .map(|rep| {
+                                                resolve_chests(&rep, &pet)
+                                                    .iter()
+                                                    .any(|n| n.place == c.place && n.ready)
+                                            })
+                                            .unwrap_or(false);
+
+                                        if still_ready {
+                                            opens_failed.fetch_add(1, Ordering::Relaxed);
+                                            last_detail = format!(
+                                                "{} 宝箱点击未生效，稍后重试",
+                                                c.place.as_str()
+                                            );
+                                            publish("retry", &last_detail, &left_state, &right_state);
+                                            next_check = Instant::now() + Duration::from_secs(5);
+                                        } else {
+                                            opens_ok.fetch_add(1, Ordering::Relaxed);
+                                            last_detail =
+                                                format!("已开启 {} 宝箱", c.place.as_str());
+                                            publish("opened", &last_detail, &left_state, &right_state);
+                                            next_check = Instant::now()
+                                                + Duration::from_millis(COOLDOWN_SLEEP_MS);
+                                        }
+                                        acted = true;
+                                        break;
+                                    }
+                                    Err(code) => {
+                                        opens_failed.fetch_add(1, Ordering::Relaxed);
+                                        if code == ERROR_ACCESS_DENIED {
+                                            last_detail =
+                                                "需要管理员权限（官方桌宠以管理员运行）".into();
+                                            publish(
+                                                "need-admin",
+                                                &last_detail,
+                                                &left_state,
+                                                &right_state,
+                                            );
+                                            next_check = Instant::now()
+                                                + Duration::from_millis(NEED_ADMIN_BACKOFF_MS);
+                                        } else {
+                                            last_detail = format!("点击投递失败 (code {code})");
+                                            publish("error", &last_detail, &left_state, &right_state);
+                                            next_check = Instant::now() + Duration::from_secs(10);
+                                        }
+                                        acted = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if acted {
+                                continue;
+                            }
+                        }
+                        UiaProbe::Unavailable => {
+                            // 继续往下走老路径
+                        }
+                    }
+                }
 
                 // ② 读区域（每轮都读，绝不缓存）
                 let rects = read_region(pet.input);

@@ -19,6 +19,14 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
+# 只为了拿到 IUIAutomation / IUIAutomationElement 的虚表定义（COM 创建走自声明 FFI）。
+# 这是 UIA 读取官方 WebView DOM 的核心依赖，无法用几个 GetProcAddress 手写替代。
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+] }
 
 [profile.release]
 opt-level = "s"

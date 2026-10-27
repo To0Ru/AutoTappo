@@ -5,6 +5,7 @@ mod chest;
 mod clicker;
 mod commands;
 mod tray;
+mod uia;
 mod updater;
 mod window;
 

@@ -698,7 +698,11 @@
     const t = (text || "").trim();
     if (!t || t === "-") return ["idle", "—"];
     if (t.indexOf("就绪") >= 0) return ["ready", "就绪"];
-    if (t.indexOf("冷却") >= 0) return ["cooldown", "冷却中"];
+    if (t.indexOf("冷却") >= 0) {
+      // UIA 路径会把精确剩余时间带过来，例如「冷却 13:34」
+      const m = t.match(/(\d{1,2}:\d{2})/);
+      return ["cooldown", m ? `冷却 ${m[1]}` : "冷却中"];
+    }
     if (t.indexOf("被遮挡") >= 0) return ["cooldown", "被遮挡"];
     if (t.indexOf("无法判定") >= 0 || t.indexOf("截取失败") >= 0) return ["idle", "识别中"];
     return ["idle", t];
@@ -715,7 +719,7 @@
   const STATE_HINT = {
     idle: "待机中",
     "no-pet": "未检测到桌宠，请先启动鸣潮桌宠",
-    "no-chest": "暂无宝箱，继续挂机即可解锁",
+    "no-chest": "宝箱未解锁（累计点击满 1000 后出现）",
     cooldown: "冷却中，到点自动开启",
     occluded: "桌宠被其他窗口遮挡，等待中",
     moving: "桌宠正在移动，稍后重试",
