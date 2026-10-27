@@ -175,6 +175,10 @@ PET_SCALE_MIN = 50, PET_SCALE_MAX = 200
 > **未实测**：阶段 2 的比例阈值（`0.42 / 0.22 / 0.28 / 0.18`）尚未在真机校准；
 > `hoverAutoHide` 打开时鼠标悬停会让桌宠淡出，现有「60 ms 区域稳定性校验」只校验区域、不校验像素，
 > 后续可考虑补一次像素一致性校验。详见 `research/auto-chest-opacity-scale.md`（该目录不进版本库）。
+>
+> **校准通道**：设置环境变量 `AUTOTAPPO_CHEST_DEBUG=1` 后从命令行启动，会向 stderr 打印
+> `[chest] stage1 warm=… white=… box=…x…` 与 `[chest] stage2 bg=(r,g,b) warm=… white=…`，
+> 可用这些真实数值反推合适阈值。不设该变量时仅一次 `AtomicU8` 判断，开销可忽略。
 
 ---
 

@@ -636,6 +636,20 @@ fn ring_margin(scale: f32) -> i32 {
     m.max(5).min(20)
 }
 
+/// 是否开启像素判定诊断日志（设置环境变量 `AUTOTAPPO_CHEST_DEBUG=1` 后从命令行启动可见）。
+/// 用于实机校准 stage 2 的比例阈值，不设该变量时几乎零开销。
+fn debug_on() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static FLAG: AtomicU8 = AtomicU8::new(2); // 2=未初始化
+    let v = FLAG.load(Ordering::Relaxed);
+    if v != 2 {
+        return v == 1;
+    }
+    let on = std::env::var_os("AUTOTAPPO_CHEST_DEBUG").is_some();
+    FLAG.store(if on { 1 } else { 0 }, Ordering::Relaxed);
+    on
+}
+
 /// 用「按钮框之外」的一圈像素估计壁纸底色（逐通道中位数，抗局部噪声）
 fn background_estimate(buf: &[u8], w: i32, h: i32, inner: &Box2) -> Option<(i32, i32, i32)> {
     let mut rs: Vec<u8> = Vec::new();
@@ -709,6 +723,15 @@ fn classify(buf: &[u8], w: i32, h: i32, inner: &Box2) -> Readiness {
     }
     let warm_ratio = warm as f32 / total as f32;
     let white_ratio = white as f32 / total as f32;
+    if debug_on() {
+        eprintln!(
+            "[chest] stage1 warm={:.3} white={:.3} box={}x{}",
+            warm_ratio,
+            white_ratio,
+            inner.w(),
+            inner.h()
+        );
+    }
     if warm_ratio >= 0.30 && white_ratio < 0.15 {
         return Readiness::Ready;
     }
@@ -753,6 +776,12 @@ fn classify(buf: &[u8], w: i32, h: i32, inner: &Box2) -> Readiness {
     }
     let wr2 = warm2 as f32 / total2 as f32;
     let wh2 = white2 as f32 / total2 as f32;
+    if debug_on() {
+        eprintln!(
+            "[chest] stage2 bg=({},{},{}) warm={:.3} white={:.3}",
+            bg_r, bg_g, bg_b, wr2, wh2
+        );
+    }
     if wr2 >= 0.28 && wh2 < 0.15 {
         Readiness::Ready
     } else if wh2 >= 0.18 {
