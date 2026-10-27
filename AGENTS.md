@@ -112,7 +112,10 @@
 - 官方 exe 清单写死 `requestedExecutionLevel level="requireAdministrator"`，**永远以管理员运行**；
 - 挂机连点走 `keybd_event` 全局键盘事件（官方用 `WH_KEYBOARD_LL` 全局钩子接收），**不受 UIPI 拦截**，普通权限即可；
 - 开箱必须把消息**定向发送到具体 HWND**（`PostMessage`），跨完整性等级会被 UIPI 拒绝（`GetLastError = 5`），**所以必须提权**；
-- 开箱没有键盘后路（官方未提供开箱热键）。
+- 开箱没有键盘后路（官方未提供开箱热键）；
+- **本项目自 v0.2.0 起在可执行文件中嵌入 `requireAdministrator` manifest**（`src-tauri/AutoTappo.exe.manifest` + `build.rs` 的 `WindowsAttributes::app_manifest`），双击即提权，**每次启动会弹一次 UAC 确认框**——这是强制提权的固有代价，无法绕过；
+- 自定义 manifest 时**必须自行声明 Common-Controls v6 依赖**（Tauri 官方文档明确警告），否则 dialog 等 API 会失效；本项目已在 manifest 中补齐；
+- NSIS 安装模式相应改为 `perMachine`（与管理员权限运行匹配）；`relaunch_as_admin` 命令保留作为兜底，正常情况下不会被触发。
 
 **⑧ 遮挡与不可用状态**
 
@@ -173,7 +176,9 @@ autotappo/
 │   └── build.yml          # GitHub Actions 自动化 CI 流水线 (推送/打Tag自动编译产出便携版与NSIS安装包)
 ├── src-tauri/
 │   ├── Cargo.toml         # 原生轻量依赖 (tauri v2, serde, rand)
-│   ├── tauri.conf.json    # 配置 (ID: com.autotappo.desktop, 图标, bundle/nsis, 无窗口尺寸——尺寸在 window.rs)
+│   ├── tauri.conf.json    # 配置 (ID: com.autotappo.desktop, bundle/nsis perMachine, 无窗口尺寸——尺寸在 window.rs)
+│   ├── AutoTappo.exe.manifest  # 嵌入 exe 的清单：requireAdministrator + PerMonitorV2 + Common-Controls v6
+│   ├── build.rs           # 通过 WindowsAttributes::app_manifest 嵌入上述清单
 │   ├── capabilities/      # Tauri v2 权限配置
 │   └── src/
 │       ├── main.rs        # 程序入口、DPI感知初始化、模块装配、窗口拦截、ExitRequested保护
@@ -216,12 +221,15 @@ autotappo/
    - z 序遮挡检测（排除自身进程窗口与 `WS_EX_TRANSPARENT` 覆盖层）；
    - 原生 `BitBlt` 抓取锚点框内缩 12% 采样，`warm/white` 双阈值判定就绪（未知一律不点）；
    - 点击前 60 ms 区域稳定性校验、点击后 350 ms 效果验证，失败降频重试；
-   - 提权不足时状态置 `need-admin` 并 60 s 退避，界面提供【以管理员重启】；
+   - 提权不足时状态置 `need-admin` 并 60 s 退避；
    - 稳态 30 分钟仅约 40 次唤醒，CPU ~0.005%。
-6. **前端无编译本地即开即看**：
+6. **强制管理员权限（v0.2.0 起）**：
+   - exe 内嵌 `requireAdministrator` manifest，双击即提权，避免用户手动右键或二次重启；
+   - 开关状态由前端 `localStorage` 唯一决定，后端快照只用于展示，**绝不反向覆盖用户选择**（否则刚打开就会被旧快照关掉，且轮询停摆后再也打不开）。
+7. **前端无编译本地即开即看**：
    - 直接双击 `web/index.html` 即可在普通浏览器中体验完整 UI 与交互动效；
    - 控制台内置 `testNewVersionUI()` 快速测试钩子。
-7. **双 Git 远端协同**：
+8. **双 Git 远端协同**：
    - GitHub: `origin` (`https://github.com/To0Ru/AutoTappo.git`)
    - Gitee: `gitee` (`git@gitee.com:To0Ru/AutoTappo.git`)
 

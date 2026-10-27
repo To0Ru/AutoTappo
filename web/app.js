@@ -3,7 +3,7 @@
 (function () {
   "use strict";
 
-  const CURRENT_VERSION = "v0.1.0";
+  const CURRENT_VERSION = "v0.2.0";
   const GITEE_API_URL = "https://gitee.com/api/v5/repos/To0Ru/AutoTappo/releases/latest";
   const GITHUB_API_URL = "https://api.github.com/repos/To0Ru/AutoTappo/releases/latest";
 
@@ -573,12 +573,11 @@
     stopped: "已停止",
   };
 
+  // 开关状态由前端（localStorage）唯一决定，绝不用后端快照反向覆盖：
+  // 后端快照只在它自己那一轮循环里更新，刚切换时必然是旧值，
+  // 一旦拿它回写就会把刚打开的开关又关掉。
   function applyChestStatus(s) {
     if (!s) return;
-    if (typeof s.enabled === "boolean" && s.enabled !== autoChest) {
-      autoChest = s.enabled;
-      renderChestSwitch();
-    }
     applySlot(slotLeft, s.left);
     applySlot(slotRight, s.right);
     if (chestHint) chestHint.textContent = STATE_HINT[s.state] || s.detail || "待机中";
