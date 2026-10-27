@@ -3,7 +3,7 @@
 (function () {
   "use strict";
 
-  const CURRENT_VERSION = "v0.2.0";
+  const CURRENT_VERSION = "v0.2.1";
   const GITEE_API_URL = "https://gitee.com/api/v5/repos/To0Ru/AutoTappo/releases/latest";
   const GITHUB_API_URL = "https://api.github.com/repos/To0Ru/AutoTappo/releases/latest";
 

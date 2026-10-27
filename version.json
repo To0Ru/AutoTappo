@@ -1,6 +1,6 @@
 {
-  "tag_name": "v0.2.0",
-  "name": "v0.2.0",
-  "body": "新增：支持自动开箱（测试版）",
-  "html_url": "https://github.com/To0Ru/AutoTappo/releases/tag/v0.2.0"
+  "tag_name": "v0.2.1",
+  "name": "v0.2.1",
+  "body": "修改：修改开宝箱逻辑（改为读取桌宠界面元素，多只桌宠重叠时也能准确找到宝箱）；新增：新增一键更新（软件内直接升级到最新版本）",
+  "html_url": "https://github.com/To0Ru/AutoTappo/releases/tag/v0.2.1"
 }

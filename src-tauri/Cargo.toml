@@ -1,6 +1,6 @@
 [package]
 name = "autotappo"
-version = "0.2.0"
+version = "0.2.1"
 description = "《鸣潮》官方桌宠 WuwaTappo 智能后台挂机助手"
 authors = ["AutoTappo"]
 edition = "2021"
