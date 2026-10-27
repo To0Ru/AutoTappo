@@ -333,6 +333,31 @@ autotappo/
 
 ---
 
+### 6.5 一键自更新（`src-tauri/src/updater.rs`）
+
+> 目标：用户不必再手动下载、删旧程序、替换文件，点一下就完成升级。
+
+流程（严格按此顺序，任何一步失败都回滚）：
+
+1. 前端从已拿到的 Release 信息里挑出便携版资产地址（`AutoTappo.exe`，排除 `setup` / `install`），
+   取不到就按约定拼 `https://<host>/To0Ru/AutoTappo/releases/download/<tag>/AutoTappo.exe`；
+2. 调 `apply_update` 命令 → 在阻塞线程里执行 `updater::apply_from_url()`（不卡 IPC 线程）；
+3. 下载到当前 exe 同目录的 `AutoTappo.exe.new`。**下载走 WinHTTP**（系统自带）：
+   零新增 crate、自动复用系统代理与系统证书库，也不会像子进程那样闪控制台；
+4. 校验：体积 ≥ 300 KB、文件头必须是 PE 魔数 `MZ`（防止把 HTML 错误页当成程序）；
+5. `AutoTappo.exe` → `AutoTappo.exe.bak`（**运行中的 exe 允许改名，不允许删除**）；
+6. `AutoTappo.exe.new` → `AutoTappo.exe`，失败则把 `.bak` 改回去；
+7. `spawn` 新 exe 后旧进程 `app.exit(0)`；启动失败同样回滚到旧版本；
+8. 新进程启动时 `cleanup_after_update()` 删除 `.bak`（老进程可能还没完全退出，
+   故放到**后台线程重试最多 10 秒**），并清掉残留的 `.new`。
+
+安全约束：
+- 下载地址走**主机白名单**（`github.com` / `*.githubusercontent.com` / `gitee.com` / `cdn.jsdelivr.net`），
+  防止前端参数被篡改成任意 URL 下载；只接受 `https://`；
+- 诊断日志落盘 `%TEMP%\autotappo-update.log`（GUI 子系统无控制台）。
+
+已知限制：便携版场景才有效；NSIS 安装版用户仍建议用安装包覆盖安装。
+
 ## 7. 开发者与 Agent 工作准则
 
 - **Git 提交与推送的边界**：

@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use std::sync::atomic::Ordering;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{window, AppState};
 
@@ -95,6 +95,28 @@ pub fn set_auto_chest(state: State<'_, AppState>, enabled: bool) {
 pub fn relaunch_as_admin(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let inner = &state.0;
     crate::chest::relaunch_as_admin()?;
+    inner.shutting_down.store(true, Ordering::SeqCst);
+    inner.clicker.shutdown.store(true, Ordering::SeqCst);
+    inner.chest.shutdown.store(true, Ordering::SeqCst);
+    app.exit(0);
+    Ok(())
+}
+
+// ---------------- 一键自更新 ----------------
+
+/// 一键更新：下载新版本 → 备份旧 exe → 原地替换 → 拉起新进程并退出。
+///
+/// 下载放在阻塞线程池里，避免卡住 WebView 的 IPC 线程。
+/// 更新成功后本进程会直接退出，前端拿不到返回值是正常现象；
+/// 只有失败时才会返回 `Err` 让界面提示原因。
+#[tauri::command]
+pub async fn apply_update(app: AppHandle, url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::updater::apply_from_url(&url))
+        .await
+        .map_err(|e| format!("更新任务异常：{e}"))??;
+
+    // 新版本已拉起，结束当前进程；.bak 由新进程启动时清理
+    let inner = &app.state::<AppState>().0;
     inner.shutting_down.store(true, Ordering::SeqCst);
     inner.clicker.shutdown.store(true, Ordering::SeqCst);
     inner.chest.shutdown.store(true, Ordering::SeqCst);

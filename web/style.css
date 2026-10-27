@@ -659,6 +659,13 @@ body {
   color: #34d399;
 }
 
+/* 一键更新失败 */
+.update-status-box.is-error {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.08);
+  color: #f87171;
+}
+
 /* 新版本安装指引卡片与 GitHub 链接 */
 .update-guide-card {
   display: flex;

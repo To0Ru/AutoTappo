@@ -77,6 +77,9 @@
   let previewInterval = null;
   let lastCheckTime = 0;
   let cachedLatestData = null;
+  // 各通道原始 Release 数据（用于挑出真实资产下载地址）
+  let cachedCandidates = [];
+  let updateBusy = false;
 
   // 热键状态 (默认 F6, VK: 0x75 = 117)
   let currentHotkeyName = localStorage.getItem("autotappo_hotkey_name") || "F6";
@@ -480,6 +483,7 @@
     }
 
     cachedLatestData = { data: latestData, source };
+    cachedCandidates = candidates;
 
     if (!silent) {
       if (updateSpinner) updateSpinner.style.display = "none";
@@ -561,6 +565,96 @@
   }
 
   if (btnCheckNow) btnCheckNow.addEventListener("click", () => checkUpdate({ silent: false }));
+
+  // ---------------- 一键自更新（下载 → 备份旧 exe → 替换 → 自动重启） ----------------
+
+  // 便携版资产在两个源上都叫 AutoTappo.exe。优先取 Release JSON 里的真实资产地址；
+  // 拿不到就按平台约定拼接（GitHub / Gitee 都支持 /releases/download/<tag>/<file>）。
+  function buildPortableUrl(channel, tag) {
+    const wantGitee = channel === "Gitee";
+    const hit = cachedCandidates.find(
+      (c) =>
+        (c.source === "Gitee" || c.source === "GitHub") === wantGitee &&
+        c.data &&
+        c.data.tag_name === tag
+    );
+    const assets = (hit && hit.data && hit.data.assets) || [];
+    const pick = assets.find((a) => {
+      const n = String((a && a.name) || "").toLowerCase();
+      return n.endsWith(".exe") && n.indexOf("setup") < 0 && n.indexOf("install") < 0;
+    });
+    if (pick && pick.browser_download_url) return pick.browser_download_url;
+    return wantGitee
+      ? `https://gitee.com/To0Ru/AutoTappo/releases/download/${tag}/AutoTappo.exe`
+      : `https://github.com/To0Ru/AutoTappo/releases/download/${tag}/AutoTappo.exe`;
+  }
+
+  function setUpdateProgress(text) {
+    if (updateStatusBox) updateStatusBox.className = "update-status-box has-new";
+    if (updateStatusText) updateStatusText.textContent = text;
+    if (updateSpinner) updateSpinner.style.display = "inline-block";
+  }
+
+  function setUpdateError(text) {
+    if (updateStatusBox) updateStatusBox.className = "update-status-box is-error";
+    if (updateStatusText) updateStatusText.textContent = text;
+    if (updateSpinner) updateSpinner.style.display = "none";
+    // 失败时把手动下载通道露出来
+    if (updateGuideCard) updateGuideCard.style.display = "flex";
+  }
+
+  async function startOneClickUpdate(channel) {
+    if (updateBusy) return;
+
+    const latest = cachedLatestData && cachedLatestData.data;
+    const tag = (latest && latest.tag_name) || "";
+    if (!tag) {
+      setUpdateError("还没拿到最新版本号，请先点「立即检查更新」");
+      return;
+    }
+
+    const url = buildPortableUrl(channel, tag);
+
+    // 普通浏览器预览模式没有原生能力，退化为打开下载地址
+    if (!isTauri) {
+      window.open(url, "_blank");
+      return;
+    }
+
+    updateBusy = true;
+    if (btnDownload) btnDownload.style.pointerEvents = "none";
+    if (btnGitee) btnGitee.style.pointerEvents = "none";
+    if (btnCheckNow) btnCheckNow.style.display = "none";
+    if (changelogArea) changelogArea.style.display = "none";
+
+    setUpdateProgress(`正在从 ${channel} 下载 ${tag}…（约 3.6 MB，请稍候）`);
+
+    try {
+      await invoke("apply_update", { url });
+      // 正常情况下进程已经在重启，几乎不会走到这里
+      setUpdateProgress("更新完成，正在重启…");
+    } catch (e) {
+      updateBusy = false;
+      if (btnDownload) btnDownload.style.pointerEvents = "";
+      if (btnGitee) btnGitee.style.pointerEvents = "";
+      if (btnCheckNow) btnCheckNow.style.display = "inline-flex";
+      const msg = String((e && e.message) || e || "未知错误");
+      setUpdateError(`更新失败：${msg}`);
+      console.error("[update] apply_update failed:", e);
+    }
+  }
+
+  function bindOneClickUpdate(btn, channel) {
+    if (!btn) return;
+    btn.addEventListener("click", (e) => {
+      if (!isTauri) return; // 浏览器预览：保留原本的跳转行为
+      e.preventDefault();
+      startOneClickUpdate(channel);
+    });
+  }
+
+  bindOneClickUpdate(btnDownload, "GitHub");
+  bindOneClickUpdate(btnGitee, "Gitee");
 
   // ---------------- 界面唤醒 / 打开时的静默自动检测逻辑 ----------------
   function triggerAutoCheck() {

@@ -5,6 +5,7 @@ mod chest;
 mod clicker;
 mod commands;
 mod tray;
+mod updater;
 mod window;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +30,9 @@ pub struct AppState(pub Arc<Inner>);
 fn main() {
     // 多屏 / 高 DPI 下必须拿到物理像素坐标，区域与截图像素才能对齐
     chest::ensure_dpi_aware();
+
+    // 上一次一键更新遗留的旧版本备份（.bak）与未完成的下载（.new）在这里清理
+    updater::cleanup_after_update();
 
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -92,6 +96,7 @@ fn main() {
             commands::get_chest_status,
             commands::set_auto_chest,
             commands::relaunch_as_admin,
+            commands::apply_update,
         ])
         .build(tauri::generate_context!())
         .expect("AutoTappo 启动失败");
