@@ -1255,8 +1255,11 @@ impl ChestController {
                                             last_detail =
                                                 format!("已开启 {} 宝箱", c.place.as_str());
                                             publish("opened", &last_detail, &left_state, &right_state);
+                                            // UIA 路径不需要「睡满 29 分钟」：
+                                            // 开完立刻重探，开掉的那个会变成 30 分钟倒计时，
+                                            // 下一轮自然按剩余时间睡；另一个若也就绪能马上点掉。
                                             next_check = Instant::now()
-                                                + Duration::from_millis(COOLDOWN_SLEEP_MS);
+                                                + Duration::from_millis(3_000);
                                         }
                                         acted = true;
                                         break;
