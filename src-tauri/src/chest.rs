@@ -1112,6 +1112,12 @@ impl ChestController {
                     continue;
                 }
 
+                // 锁屏 / 息屏：既点不到，也没必要（唤醒显示器反而打扰用户）
+                if crate::session::should_pause() {
+                    next_check = Instant::now() + Duration::from_secs(2);
+                    continue;
+                }
+
                 // ① 找窗口
                 let pet = match find_pet() {
                     Some(p) => p,

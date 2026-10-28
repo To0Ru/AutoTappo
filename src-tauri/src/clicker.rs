@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::session;
+
 // ---------------- Win32 FFI ----------------
 const KEYEVENTF_KEYUP: u32 = 0x0002;
 const SPI_GETMOUSEVANISH: u32 = 0x1020;
@@ -166,6 +168,8 @@ impl ClickerController {
             let mut rng = rand::thread_rng();
             let mut last_hotkey_down = false;
             let mut last_user_active_time = Instant::now() - Duration::from_secs(1);
+            // 锁屏/息屏检测按 500ms 节流，避免每次都去开输入桌面
+            let mut last_session_check = Instant::now() - Duration::from_secs(10);
 
             while !shutdown.load(Ordering::Relaxed) {
                 // 1. 全局可自定义热键监听
@@ -183,6 +187,17 @@ impl ClickerController {
                 // 2. 检查是否处于运行状态
                 if running.load(Ordering::Relaxed) {
                     let now = Instant::now();
+
+                    // 锁屏 / 显示器已关闭：必须完全停手。
+                    // keybd_event 对系统而言是真实输入，会把黑掉的屏幕重新点亮到锁屏界面，
+                    // 而锁屏期间桌宠本来也不计数，发键纯属副作用。
+                    if now.duration_since(last_session_check) >= Duration::from_millis(500) {
+                        last_session_check = now;
+                        if session::should_pause() {
+                            thread::sleep(Duration::from_millis(500));
+                            continue;
+                        }
+                    }
 
                     // 智能避让：用户当前正在打字、按 Shift 切输入法或按住鼠标划词
                     if is_user_actively_operating() {

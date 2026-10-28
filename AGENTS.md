@@ -220,7 +220,38 @@ PET_SCALE_MIN = 50, PET_SCALE_MAX = 200
 - 启动时通过 `SystemParametersInfoW(SPI_SETMOUSEVANISH, ...)` 暂时关闭 Windows “键入时隐藏鼠标指针”，程序完全退出时自动恢复；
 - 不执行任何改变光标坐标的位移指令，保证 100% 物理手感。
 
-### 3.4 图标多分辨率标准与 WebView2 隔离规范
+### 3.4 锁屏 / 息屏必须停手（`src-tauri/src/session.rs`）
+
+**症状**：电脑息屏后，AutoTappo 会不断把显示器点亮回「输入密码」界面。
+
+**根因**：`keybd_event` 注入的 F21~F24 在内核看来就是**真实用户输入**，会重置系统
+「最后输入时间」→ 显示器空闲计时器归零 → 息屏后我们每发一次键就点亮一次屏幕。
+官方桌宠在锁屏 / 息屏时本来就不计数（安全桌面上的输入它收不到），所以这段时间发键
+**纯属副作用**。
+
+**实现**（两条判定，任一成立即 `should_pause()`）：
+
+1. **显示器开关**：`PowerSettingRegisterNotification(GUID_CONSOLE_DISPLAY_STATE,
+   DEVICE_NOTIFY_CALLBACK, ...)` 注册电源通知，回调把 `POWERBROADCAST_SETTING`
+   偏移 20 字节处的 `DWORD`（0=关闭 / 1=开启 / 2=变暗）写进 `AtomicU32`。
+   零轮询开销，回调由系统线程触发，**不需要窗口消息循环**。注册失败也不致命
+   （退化为只靠锁屏判定）。
+2. **锁屏**：`OpenInputDesktop` 打不开输入桌面（锁屏时输入桌面是 `Winlogon`，仅 SYSTEM 可开）
+   **并且** 二次确认前台窗口属于 `LogonUI.exe` / `LockApp.exe`（或压根取不到前台窗口）
+   才认定为锁屏——只靠前者的话，万一某些机器上它因别的原因失败，会让连点器永久停摆。
+
+**接入点**：
+
+- `clicker.rs` 工作循环：500 ms 节流检查，命中则 `sleep(500ms)` 继续，**一个键都不发**；
+- `chest.rs` 工作循环：命中则 `next_check = now + 2s`（锁屏时点不到，也没必要）。
+
+> **自指陷阱**：`GetLastInputInfo` 这类「系统空闲时长」**不能用**来判断息屏——
+> 我们自己的注入键会把它不断清零。
+
+> **验证方式**：`research/probe_session.ps1` 用同样的 P/Invoke 手工验证三件事：
+> `OpenInputDesktop` 可打开、前台进程名、`PowerSettingRegisterNotification` 返回 0。
+
+### 3.5 图标多分辨率标准与 WebView2 隔离规范
 1. **Windows Multi-frame ICO 规范**：
    - Windows 资源管理器及任务栏要求 `.ico` 必须包含 16x16, 24x24, 32x32, 48x48, 64x64, 128x128, 256x256 全套标准帧，否则易被系统缓存回退或模糊拉伸；
    - `build.rs` 中显式配置 `cargo:rerun-if-changed`，确保 CI 资源更新时 Cargo 绝不沿用旧编译中间件。
@@ -250,7 +281,8 @@ autotappo/
 │       ├── chest.rs       # 自动开箱引擎 (窗口发现/区域读取/锚点定位/遮挡检测/像素判定/点击注入)
 │       ├── uia.rs         # UIA 无障碍树探测（读官方 WebView DOM：状态/矩形/剩余时间）
 │       ├── updater.rs     # 一键自更新（WinHTTP 下载 → 备份 → 替换 → 重启 → 清理 .bak）
-│       └── commands.rs    # IPC 接口 (get_status, toggle_running, set_speed, set_hotkey, reset_count, minimize, quit, get_chest_status, set_auto_chest, relaunch_as_admin, apply_update)
+│       ├── session.rs     # 锁屏/息屏检测（电源通知 + 输入桌面探测），命中则连点与开箱全部停手
+│       └── commands.rs    # IPC 接口 (get_status, toggle_running, set_speed, set_hotkey, reset_count, minimize, quit, get_chest_status, set_auto_chest, relaunch_as_admin, apply_update, cancel_update)
 ├── web/
 │   ├── index.html         # 精致看板 UI (状态卡片、三档速度、自定义热键胶囊、自动开箱控制卡、更新弹窗)
 │   ├── style.css          # 现代化玻璃拟态 UI (移除刺眼彩色Emoji，全单色几何矢量SVG，细腻微光动画)
@@ -299,6 +331,8 @@ autotappo/
    - Gitee: `gitee` (`git@gitee.com:To0Ru/AutoTappo.git`)
 9. **一键自更新（v0.2.1 起，v0.2.2 修好下载链路）**：升级弹窗里点一下就自动下载、备份旧 exe、原地替换并重启，
    带下载进度条、可随时取消；详见 6.5 节。
+10. **锁屏 / 息屏自动停手**：注入的键击会唤醒显示器，所以锁屏或息屏期间连点器与开箱引擎
+    完全暂停，不再把显示器点亮回「输入密码」界面；详见 3.4 节。
 
 ---
 

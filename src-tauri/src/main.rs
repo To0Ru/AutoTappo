@@ -4,6 +4,7 @@
 mod chest;
 mod clicker;
 mod commands;
+mod session;
 mod tray;
 mod uia;
 mod updater;
@@ -34,6 +35,10 @@ fn main() {
 
     // 上一次一键更新遗留的旧版本备份（.bak）与未完成的下载（.new）在这里清理
     updater::cleanup_after_update();
+
+    // 注册「显示器开关状态」电源通知：锁定 / 息屏时必须停手，
+    // 否则我们注入的键击会把已经黑掉的显示器重新点亮（详见 session.rs 顶部说明）
+    session::init();
 
     let app = tauri::Builder::default()
         .setup(|app| {
